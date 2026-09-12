@@ -24,6 +24,8 @@
   events            事件流（审计/统计/未来移动端推送）
   api_keys          外部触点（手机 App 等）的访问密钥（预留，默认关闭）
 """
+import hashlib
+import hmac
 import json
 import os
 import sqlite3
@@ -34,7 +36,51 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DATA_DIR = os.path.join(os.path.dirname(BASE_DIR), "data")
 DB_FILE = os.path.join(DATA_DIR, "echo.db")
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
+
+
+def _hash_token(token: str) -> str:
+    """API 密钥的存储形态：sha256(token)。
+
+    为什么 sha256 就够：token 是 `secrets.token_hex(24)` = 192 位随机，没有字典/爆破空间，
+    慢哈希（bcrypt/argon2）只会给每个带鉴权的请求白白加延迟。这里要防的是"库被读走后
+    直接拿到可用凭据"，而不是猜出低熵口令。
+    """
+    return hashlib.sha256((token or "").encode("utf-8")).hexdigest()
+
+
+def _migrate_api_keys_hash(conn):
+    """v1 → v2：api_keys 由「明文 token」改为「sha256(token)」存储（2026-09-13 MEDIUM-2）。
+
+    老库里已经发出去的 token 会被就地哈希后**原样保留**（还是同一把钥匙，客户端不用换），
+    但明文不再留在库里。SQLite 没有 sha256 函数，所以这一步只能放在 Python 里做。
+    """
+    cols = {row[1] for row in conn.execute("PRAGMA table_info(api_keys)").fetchall()}
+    if "token" not in cols:
+        return                      # 已经是新结构（新库直接就是 token_hash）
+    old = conn.execute(
+        "SELECT id,name,token,scopes,enabled,created_at,last_used_at FROM api_keys").fetchall()
+    conn.execute("DROP TABLE api_keys")
+    conn.execute("""
+    CREATE TABLE api_keys (
+      id           INTEGER PRIMARY KEY AUTOINCREMENT,
+      name         TEXT DEFAULT '',
+      token_hash   TEXT NOT NULL UNIQUE,
+      scopes       TEXT DEFAULT '["read"]',
+      enabled      INTEGER DEFAULT 1,
+      created_at   TEXT DEFAULT (datetime('now','localtime')),
+      last_used_at TEXT DEFAULT ''
+    )""")
+    for r in old:
+        if r["token"]:
+            conn.execute(
+                "INSERT INTO api_keys(id,name,token_hash,scopes,enabled,created_at,last_used_at) "
+                "VALUES(?,?,?,?,?,?,?)",
+                (r["id"], r["name"], _hash_token(r["token"]), r["scopes"],
+                 r["enabled"], r["created_at"], r["last_used_at"]))
+    if old:
+        print(f"[db] api_keys 迁移完成：{len(old)} 把密钥从明文改为 sha256 存储")
+
 
 # (version, sql) —— 顺序执行；新变更 append 即可
 MIGRATIONS = [
@@ -157,14 +203,20 @@ MIGRATIONS = [
     CREATE TABLE IF NOT EXISTS api_keys (
       id           INTEGER PRIMARY KEY AUTOINCREMENT,
       name         TEXT DEFAULT '',
-      token        TEXT UNIQUE,
+      token_hash   TEXT NOT NULL UNIQUE,      -- sha256(token) 十六进制；明文永不落库
       scopes       TEXT DEFAULT '["read"]',   -- JSON 权限列表
       enabled      INTEGER DEFAULT 1,
       created_at   TEXT DEFAULT (datetime('now','localtime')),
       last_used_at TEXT DEFAULT ''
     );
     """),
+    # 2: api_keys 从「明文 token」改为「sha256(token)」。SQL 部分留空，转换由
+    #    _migrate_api_keys_hash 在 Python 里做（SQLite 没有 sha256 函数）。
+    (2, ""),
 ]
+
+# 需要 Python 参与的迁移：版本号 → callable(conn)，在对应版本的 SQL 之后执行
+PY_MIGRATIONS = {2: _migrate_api_keys_hash}
 
 
 # ---------------------------------------------------------------- 连接管理
@@ -225,7 +277,12 @@ def init():
             cur = int(row["value"]) if row else 0
             for version, sql in MIGRATIONS:
                 if version > cur:
-                    conn.executescript(sql)
+                    if sql:
+                        conn.executescript(sql)
+                    # 少数迁移纯 SQL 干不了（例如 SQLite 没有 sha256），用 Python 补
+                    py = PY_MIGRATIONS.get(version)
+                    if py:
+                        py(conn)
                     conn.execute(
                         "INSERT INTO meta(key,value) VALUES('schema_version',?) "
                         "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
@@ -580,29 +637,39 @@ def list_events(limit=200):
     return _query("SELECT * FROM events ORDER BY id DESC LIMIT ?", (limit,))
 
 
-# ---------------------------------------------------------------- api_keys（预留）
+# ---------------------------------------------------------------- api_keys
+# 安全（2026-09-13 MEDIUM-2）：库里只存 sha256(token)，明文永不落库；
+#   * 明文只在 POST /api/keys 创建时返回一次，之后无从取回（丢了就删掉重建）；
+#   * GET /api/keys 只回元数据，不回 token 也不回哈希；
+#   * 校验用 hmac.compare_digest 逐行恒定时比较（不把 token 交给 SQL 比较，
+#     也不让命中行数/比较时长成为侧信道）。
 
 def add_api_key(name, scopes=None):
     import secrets
     token = "echo_" + secrets.token_hex(24)
-    _exec("INSERT INTO api_keys(name,token,scopes) VALUES(?,?,?)",
-          (name, token, _json_dumps(scopes or ["read"])))
+    _exec("INSERT INTO api_keys(name,token_hash,scopes) VALUES(?,?,?)",
+          (name, _hash_token(token), _json_dumps(scopes or ["read"])))
     return token
 
 
 def list_api_keys():
-    rows = _query("SELECT id,name,token,scopes,enabled,created_at,last_used_at FROM api_keys")
+    """只回元数据。token / token_hash 一律不出库。"""
+    rows = _query("SELECT id,name,scopes,enabled,created_at,last_used_at FROM api_keys")
     for r in rows:
         r["scopes"] = _json_loads(r["scopes"], [])
     return rows
 
 
 def verify_api_key(token):
-    row = _query_one("SELECT * FROM api_keys WHERE token=? AND enabled=1", (token,))
-    if row:
-        _exec("UPDATE api_keys SET last_used_at=datetime('now','localtime') WHERE id=?", (row["id"],))
-        row["scopes"] = _json_loads(row["scopes"], [])
-        return row
+    if not token:
+        return None
+    h = _hash_token(token)
+    for row in _query("SELECT * FROM api_keys WHERE enabled=1"):
+        if hmac.compare_digest(str(row.get("token_hash") or ""), h):
+            _exec("UPDATE api_keys SET last_used_at=datetime('now','localtime') WHERE id=?", (row["id"],))
+            row["scopes"] = _json_loads(row["scopes"], [])
+            row.pop("token_hash", None)      # 哈希也不往上传
+            return row
     return None
 
 

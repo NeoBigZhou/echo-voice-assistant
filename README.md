@@ -168,6 +168,8 @@ ECHO 也可以完全脱离 DSH 独立启动（转写、会议、面板都不依�
   `POST /api/meeting/start` 让 ECHO 用服务进程开麦录音再把音频下载走。
 * 不要为了手机访问把服务绑到 `0.0.0.0`：保持回环绑定，前面套带认证的反向代理
   （Caddy/Nginx + Basic Auth + TLS），并开启 `apiAuthEnabled` + Bearer Token。详见 [docs/DEPLOY.md](docs/DEPLOY.md#7-安全本机-api-只允许本机访问)。
+* API 密钥只以 `sha256(token)` 存库，校验用 `hmac.compare_digest`；`GET /api/keys` 不回 token
+  （明文仅在创建时返回一次）。开启 `apiAuthEnabled` 前先建好密钥并存到客户端，否则面板自身会被 401。
 * 数据库、录音、历史、日志都在 `data/`（不入 git）；真实凭据只放在环境变量或
   `~/.dsh/.credentials.yaml`，`dsh-failover/config.json` 已在 `.gitignore` 里。
 

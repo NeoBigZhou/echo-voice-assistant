@@ -768,14 +768,17 @@ def get_events(limit: int = 100, _auth=Depends(optional_auth)):
 
 
 # ---------------------------------------------------------------- API 密钥（移动端预留）
+# 安全（2026-09-13 MEDIUM-2）：明文 token 只在创建时返回这一次，库里存 sha256(token)。
 @router.post("/keys")
 def create_key(body: KeyCreateIn, _auth=Depends(optional_auth)):
+    """创建密钥。**返回的 token 只出现这一次**，之后无从取回（丢了就删掉重建）。"""
     token = db.add_api_key(body.name)
     return {"ok": True, "token": token, "name": body.name}
 
 
 @router.get("/keys")
 def list_keys(_auth=Depends(optional_auth)):
+    """列出密钥元数据（id/名称/权限/启用/时间）。**不回 token，也不回哈希**。"""
     return {"items": db.list_api_keys()}
 
 

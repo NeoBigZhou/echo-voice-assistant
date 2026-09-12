@@ -122,6 +122,9 @@ ECHO 的 API（8970）与容灾代理（8899）默认**不要求 token**，因�
 现在有两层防护（`app/netguard.py`，两个服务都装了）：
 
 1. **CORS 只放行回环来源**（不再是 `allow_origins=["*"]`），跨站页面拿不到响应；
+4. **API 密钥不明文落库**：`api_keys` 只存 `sha256(token)`，校验用 `hmac.compare_digest`；
+   `GET /api/keys` 不回 token/哈希，明文仅在 `POST /api/keys` 返回一次（丢了删掉重建）。
+   开启 `apiAuthEnabled` 前先创建密钥并存到客户端，否则面板自身不带 token 会被 401。
 3. **路径穿越收口**：`GET /meetings/{id}/file?kind=` 的白名单只允许 `transcript` / `topics` / `summary`，
    目录名取 basename，且最终路径必须仍在 `data/meetings/` 内（realpath 判定）；
    `/meetings/{id}/audio` 同样有兜底。没有这一层，`kind=../../..` 或 `kind=C:/...` 就能读走磁盘上
