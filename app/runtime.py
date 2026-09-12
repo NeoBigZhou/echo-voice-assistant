@@ -44,11 +44,44 @@ def sidebar_exe_path():
     return None
 
 
+def _sidebar_running() -> bool:
+    """边条进程是否已在运行。
+
+    为什么需要它：echo-sidebar.exe 是单实例应用，**再起一个实例 = 给已有实例发 toggle**。
+    自动显示（ECHO 每次启动都会跑一遍）如果盲目起进程，就会把用户已经展开的面板反复收起。
+    所以先查进程：在跑就什么都不做。
+    """
+    try:
+        out = subprocess.run(
+            ["tasklist", "/FI", "IMAGENAME eq echo-sidebar.exe", "/NH"],
+            capture_output=True, text=True, timeout=5,
+            creationflags=0x08000000,      # CREATE_NO_WINDOW
+        ).stdout or ""
+        return "echo-sidebar.exe" in out
+    except Exception as e:
+        print(f"[hotkey] 查询边条进程失败（按未运行处理）: {e}")
+        return False
+
+
+def _spawn_sidebar(collapsed: bool = False):
+    """起一个边条进程（单实例：已在跑就等价于 toggle，所以调用前务必先判进程）。"""
+    exe = sidebar_exe_path()
+    if not exe:
+        return False
+    port = int(settings.get("serverPort", 8970))
+    args = [exe, f"--url=http://127.0.0.1:{port}/", "--width=450"]
+    if collapsed:
+        args.append("--collapsed")
+    flags = 0x00000008 | 0x00000200   # DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP
+    subprocess.Popen(args, cwd=os.path.dirname(exe), creationflags=flags, close_fds=True)
+    return True
+
+
 def toggle_sidebar():
     """切换右缘边条（收起 ⇄ 展开）。
 
     echo-sidebar.exe 是单实例应用：已在运行时会通过命名管道收到 toggle 并自我切换，
-    新起的进程随即退出；没在运行就正常建窗。因此"每次热键都起一次进程"即是切换语义。
+    新起的进程随即退出；没在运行就正常建窗（**展开**——按热键的人要的是面板本身）。
     用 DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP 让边条不受 ECHO 子进程组影响。
     """
     exe = sidebar_exe_path()
@@ -56,17 +89,39 @@ def toggle_sidebar():
         print("[hotkey] 未找到边条程序 sidebar\\bin\\...\\echo-sidebar.exe，改用整窗模式")
         return open_panel_window()
     try:
-        port = int(settings.get("serverPort", 8970))
-        flags = 0x00000008 | 0x00000200   # DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP
-        subprocess.Popen(
-            [exe, f"--url=http://127.0.0.1:{port}/", "--width=450"],
-            cwd=os.path.dirname(exe), creationflags=flags, close_fds=True,
-        )
+        if not _spawn_sidebar(collapsed=False):
+            return open_panel_window()
         print(f"[hotkey] 切换仪表盘边条（{os.path.basename(exe)}）")
         return True
     except Exception as e:
         print(f"[hotkey] 启动边条失败: {e}")
         return False
+
+
+def autostart_sidebar():
+    """ECHO 启动后自动显示折叠条（设置 panelAutoStart / panelStartCollapsed）。
+
+    与热键的区别：这里**只在边条没在跑时**才起，且默认以折叠条形态出现 ——
+    启动后应该是一条安静的右缘状态条，而不是糊一整块面板在屏幕上。
+    已经在跑就原样不动（用户可能正展开着它）。
+    """
+    try:
+        if str(settings.get("panelOpenMode", "sidebar") or "sidebar").lower() != "sidebar":
+            return "skip: panelOpenMode != sidebar"
+        if not settings.get("panelAutoStart", True):
+            return "skip: panelAutoStart=False"
+        if _sidebar_running():
+            return "skip: already running"
+        if not sidebar_exe_path():
+            return "skip: sidebar exe not built"
+        collapsed = bool(settings.get("panelStartCollapsed", True))
+        if not _spawn_sidebar(collapsed=collapsed):
+            return "skip: spawn failed"
+        print(f"[hotkey] 启动后自动显示{'折叠条' if collapsed else '面板'}")
+        return "started: collapsed=%s" % collapsed
+    except Exception as e:
+        print(f"[hotkey] 自动显示边条失败: {e}")
+        return f"error: {e}"
 
 
 def restart_echo():

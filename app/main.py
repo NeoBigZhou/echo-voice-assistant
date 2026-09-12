@@ -8,6 +8,7 @@
 import os
 import sys
 import threading
+import time
 from contextlib import asynccontextmanager
 
 # 输出被 -RedirectStandardOutput 重定向到文件后默认是块缓冲，
@@ -56,6 +57,19 @@ async def lifespan(app: FastAPI):
     import app.boot as boot
     boot.setup()
     boot.start_all_async()   # 后台分阶段拉起其余组件，不阻塞 yield
+
+    # 启动后自动显示折叠条（设置 panelAutoStart / panelStartCollapsed）：
+    # 等服务真正开始监听再起——折叠条页面是经 http://127.0.0.1:8970/web/rail.html 同源加载的，
+    # 起太早会先撞上连接失败（边条侧虽有重试，但没必要）。已在运行则不打扰：
+    # echo-sidebar.exe 是单实例应用，盲目再起一个等于给它发 toggle，会把用户展开的面板收起来。
+    def _auto_rail():
+        time.sleep(2.5)
+        try:
+            print("[hotkey] autostart: " + str(runtime.autostart_sidebar()))
+        except Exception as e:
+            print(f"[hotkey] autostart 异常: {e}")
+
+    threading.Thread(target=_auto_rail, daemon=True, name="auto-rail").start()
 
     db.add_log("info", "server", "ECHO 面板已启动（后台组件拉起中）")
     yield

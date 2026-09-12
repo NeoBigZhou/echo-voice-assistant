@@ -92,6 +92,13 @@ DEFAULTS = {
     "panelOpenMode":   dict(value="sidebar", grp="voice", label="仪表盘打开方式",
                             description="sidebar=右缘边条（无边框/置顶/铺满高度，与升级前一致）；app=Chromium 应用窗口；browser=默认浏览器",
                             value_type="str", options=["sidebar", "app", "browser"]),
+    "panelAutoStart":  dict(value=True, grp="voice", label="启动时自动显示折叠条",
+                            description="ECHO 启动后自动在屏幕右缘显示折叠条（仅当「仪表盘打开方式」= sidebar 时生效）；"
+                                        "已在运行则不打扰（不会把已展开的面板收起来）",
+                            value_type="bool"),
+    "panelStartCollapsed": dict(value=True, grp="voice", label="自动显示时收起为折叠条",
+                                description="True=启动后显示 64px 折叠条（点箭头/热键展开）；False=直接展开面板",
+                                value_type="bool"),
     "silenceThreshold": dict(value=0.012, grp="voice", label="静音阈值",
                              description="音量低于此值视为静音（0~1）", value_type="float"),
     "silenceHangoverMs": dict(value=1100, grp="voice", label="静音收尾毫秒",
