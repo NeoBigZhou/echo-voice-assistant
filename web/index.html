@@ -1,0 +1,187 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>ECHO · 个人助理控制台</title>
+<meta name="theme-color" content="#0f1117">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<link rel="manifest" href="/manifest.json">
+<link rel="icon" type="image/png" href="/web/icon-192.png">
+<link rel="apple-touch-icon" href="/web/icon-192.png">
+<link rel="stylesheet" href="/web/app.css">
+</head>
+<body>
+<header class="topbar">
+  <div class="brand">ECHO<span class="sub">个人助理</span></div>
+  <nav class="tabs">
+    <button class="tab active" data-view="dashboard">仪表盘</button>
+    <button class="tab" data-view="settings">设置</button>
+    <button class="tab" data-view="history">历史</button>
+    <button class="tab" data-view="meetings">会议</button>
+    <button class="tab" data-view="boot">启动</button>
+    <button class="tab" data-view="failover">模型容灾</button>
+  </nav>
+  <div class="top-status" id="topStatus">—</div>
+</header>
+
+<main>
+  <!-- ============ 仪表盘 ============ -->
+  <section id="view-dashboard" class="view">
+    <div class="grid dashboard-grid">
+      <!-- 命令模块：控制 + 目标选择 + 近期历史 -->
+      <div class="card span-2" id="cmdCard">
+        <div class="card-title"><span class="ic sbadge" title="超级助理"><b>S</b></span>超级助理
+          <div class="mic-level hidden" id="cmdLevel" title="语音命令收音电平"><i></i><i></i><i></i><i></i><i></i></div>
+          <a class="more" id="gotoHistory" href="#">全部 ›</a>
+        </div>
+        <div class="card-body row">
+          <input id="cmdInput" placeholder="例如：帮我把今天的待办整理成列表" class="input grow">
+          <button class="btn" id="btnCmdSend">发送</button>
+          <button class="btn" id="btnCapture">🎤 说话</button>
+        </div>
+        <div class="target-row">
+          <select id="wsSelect" class="ctl" title="命令发送到哪个工作区"></select>
+          <select id="sessSelect" class="ctl" title="命令发送到哪个对话"></select>
+        </div>
+        <div class="cmd-list" id="recentCmds"></div>
+      </div>
+
+      <!-- 会议模块：控制 + 近期历史 -->
+      <div class="card span-2" id="meetingCard">
+        <div class="card-title"><span class="ic">🎙️</span>会议录音
+          <span class="badge" id="meetingBadge">空闲</span>
+          <div class="mic-level hidden" id="micLevel" title="麦克风电平">
+            <i></i><i></i><i></i><i></i><i></i>
+          </div>
+          <a class="more" id="gotoMeetings" href="#">全部 ›</a>
+        </div>
+        <div class="card-body row">
+          <button class="btn big" id="btnMeeting">开始录音</button>
+          <div class="muted" id="meetingInfo">未在录音</div>
+        </div>
+        <div class="meeting-list" id="recentMeetings"></div>
+      </div>
+
+      <!-- 模型容灾路由：仪表盘小卡片（点击进详情页签）+ 右下角"收起为折叠条"箭头 -->
+      <div class="fo-wrap span-2" id="foWrap">
+        <div class="card failover-card" id="failoverCard" title="点击查看完整路由历史与状态">
+          <div class="card-title"><span class="ic">🛰️</span>模型容灾路由
+            <span class="badge idle" id="foBadge">检查中…</span>
+            <a class="more" data-goto-link="failover" href="#">详情 ›</a>
+          </div>
+          <div class="card-body failover-row">
+            <div class="fo-left">
+              <span class="fo-dot" id="foDot"></span>
+              <b class="fo-state" id="foStateText">—</b>
+            </div>
+            <div class="fo-right">
+              <span class="fo-k">走内网 <b id="foInt">0</b></span>
+              <span class="fo-k">走公网 <b id="foPub">0</b></span>
+              <span class="fo-k">失败 <b id="foFail">0</b></span>
+              <span class="fo-k">共 <b id="foReq">0</b></span>
+              <span class="muted fo-time" id="foTime"></span>
+            </div>
+          </div>
+        </div>
+        <button class="rail-btn" id="btnRailCollapse" aria-label="收起为折叠条"
+                title="收起为折叠条（Ctrl+Shift+E 展开；鼠标贴屏幕右缘可唤回）">
+          <svg viewBox="0 0 24 24" width="15" height="15" aria-hidden="true">
+            <path d="M9 5l7 7-7 7" fill="none" stroke="currentColor" stroke-width="2.6"
+                  stroke-linecap="round" stroke-linejoin="round"/>
+          </svg>
+        </button>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ 设置 ============ -->
+  <section id="view-settings" class="view hidden">
+    <div class="card">
+      <div class="card-title">设置 <span class="muted">(保存到本地数据库)</span>
+        <span class="spacer"></span>
+        <button class="btn" id="btnSettingsCollapseAll" title="折叠或展开全部分组">折叠/展开</button>
+        <button class="btn" id="btnSettingsSave">保存</button>
+      </div>
+      <div id="settingsForm" class="settings-form"></div>
+    </div>
+    <!-- 模型清单：仓库不含模型文件，这里列出"要下哪些、多大、装到哪、怎么拿" -->
+    <div class="card">
+      <div class="card-title">📦 模型
+        <span class="muted" id="modelSummary">—</span>
+        <span class="spacer"></span>
+        <span class="muted" id="modelHint">仓库不含模型文件；状态按本地实际路径检测</span>
+      </div>
+      <div id="modelList" class="model-list"></div>
+    </div>
+    <!-- 服务运维：重启 ECHO 本身（独立进程执行，面板自动重连） -->
+    <div class="card">
+      <div class="card-title">🔧 服务
+        <span class="muted" id="svcHint">重启会中断正在进行的录音/命令</span>
+      </div>
+      <div class="card-body row">
+        <button class="btn danger" id="btnRestartEcho" title="停止并重新启动 ECHO 服务进程">重启 ECHO 服务</button>
+        <span class="muted" id="restartState"></span>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ 历史 ============ -->
+  <section id="view-history" class="view hidden">
+    <div class="card">
+      <div class="card-title">命令历史
+        <span class="spacer"></span>
+        <button class="btn danger" id="btnClearCmds">清空</button>
+      </div>
+      <div id="historyList" class="cmd-list"></div>
+    </div>
+  </section>
+
+  <!-- ============ 会议 ============ -->
+  <section id="view-meetings" class="view hidden">
+    <div class="card">
+      <div class="card-title">会议列表
+        <span class="spacer"></span>
+        <button class="btn" id="btnMeetingFromList">开始录音</button>
+        <button class="btn danger" id="btnCleanShort" title="删除 2 分钟以内的会议录音（含音频）">清理短录音</button>
+      </div>
+      <div id="meetingList" class="meeting-list"></div>
+    </div>
+  </section>
+
+  <!-- ============ 启动 ============ -->
+  <section id="view-boot" class="view hidden">
+    <div class="card">
+      <div class="card-title">启动状态
+        <span class="spacer"></span>
+        <span class="muted" id="bootSummary">—</span>
+      </div>
+      <div id="bootComponents" class="boot-list"></div>
+    </div>
+    <div class="card">
+      <div class="card-title">启动日志 <span class="muted" style="font-size:12px">(自动刷新)</span></div>
+      <div id="bootLogs" class="boot-log"></div>
+    </div>
+    <div class="card">
+      <div class="card-title">守护进程关键事件 <span class="muted" style="font-size:12px">(echo-host · 自动刷新 · 刷屏信息已过滤)</span></div>
+      <div id="guardLogs" class="boot-log"></div>
+    </div>
+  </section>
+
+  <!-- ============ 模型容灾（完整状态页，内嵌容灾代理仪表盘） ============ -->
+  <section id="view-failover" class="view hidden">
+    <div class="card">
+      <div class="card-title">模型容灾路由
+        <span class="spacer"></span>
+        <span class="muted" style="font-size:12px">内网优先；内网连不上自动切公网 DeepSeek（数据实时刷新）</span>
+      </div>
+      <iframe id="foFrame" class="fo-frame" src="http://127.0.0.1:8899/" title="模型容灾路由状态"></iframe>
+    </div>
+  </section>
+</main>
+
+<div id="toast" class="toast hidden"></div>
+<script src="/web/app.js"></script>
+</body>
+</html>

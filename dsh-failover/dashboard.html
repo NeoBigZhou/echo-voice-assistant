@@ -1,0 +1,148 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>DSH 模型容灾路由</title>
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: "Segoe UI", "Microsoft YaHei", system-ui, sans-serif;
+    background: #0f1420; color: #e6e9f0; min-height: 100vh; padding: 24px;
+  }
+  .wrap { max-width: 720px; margin: 0 auto; }
+  h1 { font-size: 20px; margin-bottom: 4px; display: flex; align-items: center; gap: 10px; }
+  .sub { color: #8b93a7; font-size: 13px; margin-bottom: 20px; }
+  .card {
+    background: #171e2e; border: 1px solid #252e42; border-radius: 14px;
+    padding: 20px; margin-bottom: 16px;
+  }
+  .big {
+    font-size: 44px; font-weight: 700; letter-spacing: 1px;
+    display: flex; align-items: center; gap: 14px; flex-wrap: wrap;
+  }
+  .dot { width: 14px; height: 14px; border-radius: 50%; display: inline-block; }
+  .st-internal { color: #3ddc84; } .st-public { color: #ffc94d; } .st-failed { color: #ff6b6b; } .st-idle { color: #8b93a7; }
+  .dot-internal { background: #3ddc84; box-shadow: 0 0 12px #3ddc8488; }
+  .dot-public  { background: #ffc94d; box-shadow: 0 0 12px #ffc94d88; }
+  .dot-failed  { background: #ff6b6b; box-shadow: 0 0 12px #ff6b6b88; }
+  .dot-idle    { background: #8b93a7; }
+  .state-line { color: #8b93a7; font-size: 14px; margin-top: 8px; }
+  .stats { display: flex; gap: 12px; flex-wrap: wrap; margin-top: 16px; }
+  .stat {
+    flex: 1; min-width: 110px; background: #10172a; border-radius: 10px;
+    padding: 12px 14px; text-align: center;
+  }
+  .stat .n { font-size: 26px; font-weight: 700; }
+  .stat .l { font-size: 12px; color: #8b93a7; margin-top: 2px; }
+  .stat.g .n { color: #3ddc84; } .stat.y .n { color: #ffc94d; } .stat.r .n { color: #ff6b6b; } .stat.b .n { color: #6ea8ff; }
+  h2 { font-size: 15px; margin-bottom: 10px; color: #c3cadb; }
+  .hist { list-style: none; }
+  .hist li {
+    display: flex; align-items: center; gap: 10px; padding: 8px 2px;
+    border-bottom: 1px dashed #232c40; font-size: 14px;
+  }
+  .hist li:last-child { border-bottom: none; }
+  .hist .t { color: #8b93a7; font-variant-numeric: tabular-nums; min-width: 64px; }
+  .pill {
+    font-size: 12px; padding: 2px 10px; border-radius: 999px; font-weight: 600;
+  }
+  .pill-internal { background: #12341f; color: #3ddc84; }
+  .pill-public  { background: #3a2f10; color: #ffc94d; }
+  .pill-failed  { background: #3a1515; color: #ff6b6b; }
+  .pill-idle    { background: #232c40; color: #8b93a7; }
+  .up { color: #8b93a7; font-size: 12px; }
+  .up code { background: #10172a; padding: 1px 6px; border-radius: 6px; color: #aeb8cd; word-break: break-all; }
+  .note { background: #10172a; border-radius: 10px; padding: 12px 14px; font-size: 12.5px; color: #8b93a7; line-height: 1.7; }
+  .live { color: #3ddc84; font-size: 12px; font-weight: 600; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>🛰 DSH 模型容灾路由 <span class="live" id="liveTag"></span></h1>
+  <div class="sub">模型下拉选内网模型 → 本代理 → 内网优先，内网连不上自动切公网。</div>
+
+  <div class="card">
+    <div class="big"><span class="dot dot-idle" id="dot"></span><span class="st-idle" id="state">等待请求…</span></div>
+    <div class="state-line" id="detail">尚无模型请求经过本代理。去 DSH 里发一句话，这里会自动刷新。</div>
+    <div class="stats">
+      <div class="stat b"><div class="n" id="nReq">0</div><div class="l">请求总数</div></div>
+      <div class="stat g"><div class="n" id="nInt">0</div><div class="l">走内网</div></div>
+      <div class="stat y"><div class="n" id="nPub">0</div><div class="l">走公网(回退)</div></div>
+      <div class="stat r"><div class="n" id="nFail">0</div><div class="l">失败</div></div>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>路由切换历史（同路由连续请求已合并）</h2>
+    <ul class="hist" id="hist"><li class="up">暂无</li></ul>
+  </div>
+
+  <div class="card">
+    <h2>上游</h2>
+    <div class="up">内网：<code id="upInt">-</code></div>
+    <div class="up">公网：<code id="upPub">-</code></div>
+    <div class="up">内网Token / 公网Key：<span id="upKeys">-</span></div>
+  </div>
+
+  <div class="note">
+    💡 <b>怎么读：</b>绿色 = 这次请求打到了<b>内网</b>网关（自建/内网模型）；
+    黄色 = 内网<b>连不上</b>，代理自动改用了<b>公网</b> api.deepseek.com（deepseek-chat）。
+    只有“连不上”才会走公网，内网可达时永远走内网。
+  </div>
+</div>
+
+<script>
+const $ = id => document.getElementById(id);
+const R = {
+  internal: { cls: "st-internal", dot: "dot-internal", pill: "pill-internal", label: "内网" },
+  public:   { cls: "st-public",   dot: "dot-public",   pill: "pill-public",   label: "公网(回退)" },
+  failed:   { cls: "st-failed",   dot: "dot-failed",   pill: "pill-failed",   label: "失败" },
+  idle:     { cls: "st-idle",     dot: "dot-idle",     pill: "pill-idle",     label: "等待请求" },
+};
+function refresh() {
+  fetch("/health").then(r => r.json()).then(d => {
+    const rt = d.routes || {};
+    const last = rt.last_route || "idle";
+    const meta = R[last] || R.idle;
+    $("liveTag").textContent = "● LIVE";
+    $("state").textContent = last === "internal" ? "内网 ✅"
+      : last === "public" ? "公网（内网不可达回退）"
+      : last === "failed" ? "失败"
+      : "等待请求…";
+    $("state").className = meta.cls;
+    $("dot").className = "dot " + meta.dot;
+    $("detail").textContent = rt.last_route_at
+      ? "最近一次判定于 " + rt.last_route_at + "，请求 #" + rt.requests
+      : "尚无模型请求经过本代理。去 DSH 里发一句话，这里会自动刷新。";
+    $("nReq").textContent = rt.requests; $("nInt").textContent = rt.internal;
+    $("nPub").textContent = rt.public;   $("nFail").textContent = rt.failed;
+    $("upInt").textContent = d.internal || "-";
+    $("upPub").textContent = d.public || "-";
+    $("upKeys").textContent = (d.has_internal_token ? "内网已配置" : "内网缺失") + " / " + (d.has_public_key ? "公网已配置" : "公网缺失");
+    const hist = d.history || [];
+    const ul = $("hist"); ul.innerHTML = "";
+    if (!hist.length) {
+      const li = document.createElement("li"); li.className = "up"; li.textContent = "暂无"; ul.appendChild(li);
+    } else {
+      hist.slice().reverse().forEach(h => {
+        const m = R[h.route] || R.idle;
+        const li = document.createElement("li");
+        const t = document.createElement("span"); t.className = "t"; t.textContent = h.t;
+        const p = document.createElement("span"); p.className = "pill " + m.pill; p.textContent = m.label;
+        const x = document.createElement("span"); x.className = "up"; x.textContent = "请求 #" + h.req;
+        li.append(t, p, x); ul.appendChild(li);
+      });
+    }
+  }).catch(() => {
+    $("liveTag").textContent = "○ 离线";
+    $("state").textContent = "代理未响应";
+    $("state").className = "st-failed"; $("dot").className = "dot dot-failed";
+  });
+}
+refresh();
+setInterval(refresh, 2000);
+</script>
+</body>
+</html>

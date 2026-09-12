@@ -1,0 +1,664 @@
+// Program.cs — ECHO 仪表盘边条（独立进程 · 无边框 · 贴右缘 · 置顶 · 可拖左边框调宽）
+//
+// 为什么需要这个独立进程：
+//   DSH Desktop 2.0.9 里，挂在 app.asar.unpacked 的插件只能拿到 electron 的
+//   "工具/渲染进程变体"（own=[net,systemPreferences]，无 app/BrowserWindow/screen/
+//   globalShortcut）；静态 import 与动态 import 结果一致（2026-09-12 实测，见
+//   ECHO\data\logs\electron-probe.log）。而 2.0.5 时插件能拿到完整 API 并直接开边条
+//   （旧日志 `ECHO 仪表盘: 展开（416px …）`）。因此边条改为独立进程：
+//   .NET 7 WinForms + WebView2（本机已装运行时 152.x）承载同一个 http://127.0.0.1:8970。
+//
+// 交互（对齐升级前的边条）：
+//   - 无边框、不占任务栏、始终置顶、贴 1 号屏右缘、高度铺满工作区
+//   - 左边缘留 6px 把手：拖它调宽度（WebView2 是独立子窗口，会吞掉鼠标事件，
+//     所以宽度把手必须由窗体自己那一条边来承担）；宽度会记住
+//   - 单实例：再次启动（热键）→ 收起为 48px 窄条 ⇄ 展开
+//
+// 诊断：所有异常与每次吸附都会写 %TEMP%\echo-sidebar.log（排查宽度/DIP 问题用）。
+//
+// 用法：echo-sidebar.exe [--url=http://127.0.0.1:8970/] [--collapsed] [--width=450] [--probe]
+
+using System.Diagnostics;
+using System.Drawing;
+using System.IO;
+using System.IO.Pipes;
+using System.Text;
+using System.Windows.Forms;
+using Microsoft.Web.WebView2.WinForms;
+
+namespace EchoSidebar;
+
+/// <summary>边条尺寸与交互常量（Program 与 SidebarForm 共用）。</summary>
+internal static class SidebarConfig
+{
+    public const string PipeName = "echo-sidebar-toggle";
+    /// <summary>窄条显示态宽度（逻辑像素）。演进：48 → 64 → 100 → 64（2026-09-12 用户最终选 64）。</summary>
+    public const int RailWidth = 64;
+    public const int MinPanelWidth = 320;
+    public const int MinLeftPad = 120;
+    public const int DefaultWidth = 450;
+    /// <summary>展开态左边缘把手宽度（逻辑像素）：留给自己做拖拽调宽，WebView2 不覆盖这条边。</summary>
+    public const int GripWidth = 6;
+    /// <summary>窄条态左侧"点击展开"区域宽度（逻辑像素）。位于 WebView 之外，不遮挡窄条内容。</summary>
+    internal const int RailGripWidth = 12;
+    /// <summary>隐藏态在屏右缘保留的可唤回宽度（逻辑像素）。</summary>
+    internal const int RailPeekWidth = 3;
+    /// <summary>鼠标进入屏右缘多少像素内就把窄条唤回（逻辑像素）。</summary>
+    internal const int RailWakeMargin = 6;
+    /// <summary>
+    /// 窄条内容的左补偿（逻辑像素，正值=向左移）。
+    /// 窄条态 WebView 从 RailGripWidth(12) 处开始，若按自身宽度居中，内容中心会落在
+    /// 12+36/2=30px，相对 48px 窄条偏右 6px。这里按 2/3 补偿（4px），既接近居中又
+    /// 不贴到把手边界。注入方式：rail 页面 body 上加 padding-left。
+    /// </summary>
+    internal const int RailVisualShift = RailGripWidth / 3;
+}
+
+internal static class Program
+{
+    internal static readonly string LogPath = Path.Combine(Path.GetTempPath(), "echo-sidebar.log");
+
+    internal static void Log(string message)
+    {
+        try { File.AppendAllText(LogPath, $"[{DateTime.Now:HH:mm:ss.fff}] {message}\n"); } catch { /* 忽略 */ }
+    }
+
+    /// <summary>
+    /// 用户拖拽过的展开宽度（逻辑像素）落盘文件。
+    /// 为什么需要：记忆值原本只在进程内，重启边条（开机、DSH 升级后拉起）就退回 --width=450，
+    /// 用户每次都得重新拖一次（2026-09-12 实测：拖到 400 后重启又变 450）。
+    /// </summary>
+    internal static readonly string WidthPath = Path.Combine(
+        Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+        "echo-sidebar", "panel-width.txt");
+
+    internal static int LoadRememberedWidth()
+    {
+        try
+        {
+            if (!File.Exists(WidthPath)) return 0;
+            return int.TryParse(File.ReadAllText(WidthPath).Trim(), out var v) ? v : 0;
+        }
+        catch (Exception ex) { Log("load width failed: " + ex.Message); return 0; }
+    }
+
+    internal static void SaveRememberedWidth(int logical)
+    {
+        try
+        {
+            Directory.CreateDirectory(Path.GetDirectoryName(WidthPath));
+            File.WriteAllText(WidthPath, logical.ToString());
+        }
+        catch (Exception ex) { Log("save width failed: " + ex.Message); }
+    }
+
+    [STAThread]
+    private static void Main(string[] args)
+    {
+        AppDomain.CurrentDomain.UnhandledException += (_, e) =>
+            Log("UNHANDLED: " + (e.ExceptionObject as Exception)?.ToString());
+        Application.ThreadException += (_, e) => Log("THREAD EXCEPTION: " + e.Exception);
+
+        var url = ArgValue(args, "--url") ?? "http://127.0.0.1:8970/";
+        var collapsed = args.Any(a => a.Equals("--collapsed", StringComparison.OrdinalIgnoreCase));
+        var width = ArgInt(args, "--width") ?? SidebarConfig.DefaultWidth;
+        // 落盘的用户宽度优先于调用方的默认宽度：ECHO 固定传 --width=450，若直接采信，
+        // 用户拖过的宽度在每次重启后都会丢。显式传非默认宽度（人工调试）仍然生效。
+        if (width == SidebarConfig.DefaultWidth)
+        {
+            var remembered = LoadRememberedWidth();
+            if (remembered > 0)
+            {
+                Log($"remembered width from disk: {remembered} (overrides --width={width})");
+                width = remembered;
+            }
+        }
+        // 折叠条页面：优先命令行 --rail，其次常见位置（ECHO\web\rail.html），都没有则用内嵌兜底
+        var railArg = ArgValue(args, "--rail");
+        var railPath = ResolveRailPath(railArg);
+        Log($"rail page: {railPath ?? "(none - using inline fallback)"}");
+
+        ApplicationConfiguration.Initialize();
+
+        // 诊断模式：只计算尺寸并写日志，不建窗口
+        if (args.Any(a => a.Equals("--probe", StringComparison.OrdinalIgnoreCase)))
+        {
+            var area = Screen.PrimaryScreen?.WorkingArea ?? Rectangle.Empty;
+            Log($"probe: requested={width} workArea={area} bounds={Screen.PrimaryScreen?.Bounds} device={Screen.PrimaryScreen?.DeviceName}");
+            return;
+        }
+
+        Log($"start: url={url} collapsed={collapsed} width={width} pid={Environment.ProcessId}");
+        Log($"screen: workArea={Screen.PrimaryScreen?.WorkingArea} bounds={Screen.PrimaryScreen?.Bounds} " +
+            $"deviceDpi={DeviceDpiOf()}");
+
+        // 单实例：已有边条在跑 → 通知它按 --signal 指定的动作处理，然后本进程退出。
+        // --signal 取值：toggle（默认，与热键同义）| rail-hide | rail-show
+        var signal = (ArgValue(args, "--signal") ?? "toggle").Trim();
+        if (TrySignalExistingSidebar(signal))
+        {
+            Log($"existing sidebar signaled ({signal}); exiting");
+            return;
+        }
+
+        var form = new SidebarForm(url, collapsed, width, railPath);
+        StartToggleListener(form);
+        Application.Run(form);
+    }
+
+    /// <summary>从注册表取主屏 DPI（不依赖窗口句柄，启动早期也能拿到）。</summary>
+    private static string DeviceDpiOf()
+    {
+        try
+        {
+            using var key = Microsoft.Win32.Registry.CurrentUser.OpenSubKey(@"Control Panel\Desktop\WindowMetrics");
+            var applied = key?.GetValue("AppliedDPI");
+            return applied is int dpi ? $"{dpi} ({(int)Math.Round(dpi / 96.0 * 100)}%)" : "unknown";
+        }
+        catch { return "unknown"; }
+    }
+
+    private static string ArgValue(string[] args, string name)
+    {
+        foreach (var a in args)
+        {
+            if (a.StartsWith(name + "=", StringComparison.OrdinalIgnoreCase)) return a[(name.Length + 1)..];
+        }
+        return null;
+    }
+
+    private static int? ArgInt(string[] args, string name)
+    {
+        var raw = ArgValue(args, name);
+        return int.TryParse(raw, out var v) ? v : null;
+    }
+
+    /// <summary>
+    /// 定位折叠条页面 rail.html。
+    /// 依次尝试：显式 --rail 参数 → exe 同目录 → ECHO 项目 web 目录（沿可执行路径向上找）。
+    /// 找不到则返回 null，由调用方使用内嵌兜底页。
+    /// </summary>
+    private static string ResolveRailPath(string explicitPath)
+    {
+        var candidates = new List<string>();
+        if (!string.IsNullOrWhiteSpace(explicitPath)) candidates.Add(explicitPath);
+        candidates.Add(Path.Combine(AppContext.BaseDirectory, "rail.html"));
+        // exe 通常在 <ECHO>\sidebar\bin\Release\net7.0-windows\win-x64\ ，向上找 <ECHO>\web\rail.html
+        var dir = new DirectoryInfo(AppContext.BaseDirectory);
+        for (var i = 0; i < 8 && dir != null; i++, dir = dir.Parent)
+        {
+            candidates.Add(Path.Combine(dir.FullName, "web", "rail.html"));
+        }
+        foreach (var c in candidates)
+        {
+            try { if (File.Exists(c)) return Path.GetFullPath(c); } catch { /* 忽略非法路径 */ }
+        }
+        return null;
+    }
+
+    private static bool TrySignalExistingSidebar(string command)
+    {
+        try
+        {
+            using var client = new NamedPipeClientStream(".", SidebarConfig.PipeName, PipeDirection.Out, PipeOptions.None);
+            client.Connect(600);
+            using var writer = new StreamWriter(client, Encoding.UTF8) { AutoFlush = true };
+            writer.Write(command);
+            return true;
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    private static void StartToggleListener(SidebarForm form)
+    {
+        var worker = new Thread(() =>
+        {
+            while (true)
+            {
+                try
+                {
+                    using var server = new NamedPipeServerStream(SidebarConfig.PipeName, PipeDirection.In, 1);
+                    server.WaitForConnection();
+                    using var reader = new StreamReader(server, Encoding.UTF8);
+                    var command = reader.ReadToEnd();
+                    if (command.Contains("rail-hide", StringComparison.OrdinalIgnoreCase))
+                    {
+                        form.BeginInvoke(new Action(form.HideRail));
+                    }
+                    else if (command.Contains("rail-show", StringComparison.OrdinalIgnoreCase))
+                    {
+                        form.BeginInvoke(new Action(() => form.ShowRail("signal")));
+                    }
+                    else if (command.Contains("toggle", StringComparison.OrdinalIgnoreCase))
+                    {
+                        form.BeginInvoke(new Action(form.ToggleFromHotkey));
+                    }
+                }
+                catch
+                {
+                    Thread.Sleep(500);
+                }
+            }
+        })
+        { IsBackground = true, Name = "echo-sidebar-toggle-listener" };
+        worker.Start();
+    }
+}
+
+/// <summary>右缘仪表盘边条窗口。</summary>
+internal sealed class SidebarForm : Form
+{
+    private const int WM_NCHITTEST = 0x0084;
+    private const int HTCLIENT = 1;
+    private const int HTLEFT = 10;
+
+    private readonly WebView2 _web = new();
+    private readonly string _baseUrl;
+    private readonly string _railPath;      // 折叠条页面（可为 null → 用内嵌兜底）
+    private readonly bool _startCollapsed;
+    private bool _railMode;
+    private bool _docking;
+    private int _pendingWidth;
+    private System.Windows.Forms.Timer _dockTimer;
+
+    // ---- 窄条显示/隐藏（2026-09-12 用户改为：不再自动隐藏；点底部箭头隐藏，鼠标贴屏右缘唤回）----
+    private System.Windows.Forms.Timer _railTimer;   // 200ms 轮询：隐藏态下判断鼠标是否贴到屏右缘
+    private bool _railVisible = true;                // 窄条当前是否在屏内（隐藏态只留 RailPeekWidth）
+    private bool _railWakeArmed = true;              // 隐藏后必须先把鼠标移出贴边带，贴边才唤回（否则点箭头后立刻弹回）
+
+    public SidebarForm(string url, bool collapsed, int width, string railPath = null)
+    {
+        _baseUrl = url;
+        _railPath = railPath;
+        _startCollapsed = collapsed;
+        _pendingWidth = width < SidebarConfig.MinPanelWidth ? SidebarConfig.DefaultWidth : width;
+        _railVisible = true;
+
+        FormBorderStyle = FormBorderStyle.None;
+        ShowInTaskbar = false;
+        TopMost = true;
+        StartPosition = FormStartPosition.Manual;
+        Text = "ECHO 仪表盘";
+        BackColor = Color.FromArgb(24, 24, 27);
+
+        // 左侧留出把手：宽度 = 客户区 - 把手，WebView2 不再覆盖那条边
+        _web.Dock = DockStyle.None;
+        _web.Anchor = AnchorStyles.Top | AnchorStyles.Bottom | AnchorStyles.Left | AnchorStyles.Right;
+        Controls.Add(_web);
+        // 窄条态下 WebView2 只占右侧，左边留给窗体做"点击展开"（它拿不到 WebView 上的鼠标事件）
+        _web.MouseDown += OnWebViewMouseDown;
+
+        Load += async (_, _) => await InitAsync();
+        Resize += (_, _) => OnResized();
+        // 只有"用户拖拽结束"才是一次真正的宽度调整：Resize/Move 在程序自己设置 Bounds、
+        // 子控件布局时都会触发，用它们记录用户宽度会把 --width 覆盖掉（2026-09-12 实测）。
+        ResizeEnd += (_, _) => RememberUserWidth();
+    }
+
+    /// <summary>用户拖拽左边框结束：记住宽度（换算回逻辑像素）并按新宽度重新贴右缘。</summary>
+    private void RememberUserWidth()
+    {
+        if (_docking || _railMode) return;
+        // Width 是物理像素；记忆值统一存逻辑像素（与 --width 参数同一空间）
+        _pendingWidth = Math.Max(SidebarConfig.MinPanelWidth, (int)Math.Round(Width / DpiScale()));
+        Program.Log($"user width remembered: {_pendingWidth} (physical={Width})");
+        Program.SaveRememberedWidth(_pendingWidth);
+        DockToRightEdge();
+    }
+
+    /// <summary>
+    /// 把 WebView2 放到"把手右侧"：ClientSize 是物理像素，把手宽度按 DPI 换算，
+    /// 保证"逻辑 6px 把手"在各缩放下视觉一致。
+    /// </summary>
+    private void LayoutWebView()
+    {
+        // 窄条态：WebView 占满整宽（折叠条内容需要完整宽度，且已取消"点击展开"把手区）。
+        // 展开态：左边缘留 GripWidth（逻辑）把手给窗体，用于拖拽调宽。
+        // 例外：滑出/滑入动画期间，WebView 保持展开后的宽度、Left=0（跟着窗口左缘一起动），
+        // 超出窗体的部分被裁剪 → 视觉上是"抽屉从屏幕右缘滑出/滑入"，内容是整体平移不重排。
+        if (_railMode && _railSlideWidth > 0)
+        {
+            var sliding = _docking;
+            _docking = true;
+            try { _web.Bounds = new Rectangle(0, 0, _railSlideWidth, ClientSize.Height); }
+            finally { _docking = sliding; }
+            return;
+        }
+        var grip = _railMode ? 0 : ScaleLogical(SidebarConfig.GripWidth);
+        // 关键：设置子控件位置会触发窗体的 Resize/Layout，若不加 _docking 保护，
+        // OnResized 会把"窗体当前宽度(初始 300)"误当成用户宽度记下 → --width=450 被覆盖成
+        // 最小值 320（2026-09-12 实测：docked wanted=320，就是这么来的）。
+        var wasDocking = _docking;
+        _docking = true;
+        try { _web.Bounds = new Rectangle(grip, 0, Math.Max(0, ClientSize.Width - grip), ClientSize.Height); }
+        finally { _docking = wasDocking; }
+    }
+
+    /// <summary>鼠标左键按下：已取消"点击展开"（用户 2026-09-12 要求折叠条做成功能条）。</summary>
+    protected override void OnMouseDown(MouseEventArgs e)
+    {
+        base.OnMouseDown(e);
+    }
+
+    private void OnWebViewMouseDown(object sender, MouseEventArgs e)
+    {
+        // 保留占位：折叠条上的控件由页面自己处理，窗口层不再做任何点击动作
+    }
+
+    private void ExpandFromRail(string reason)
+    {
+        Program.Log($"expand from rail: {reason}");
+        Expand();
+    }
+
+    private int ScaleLogical(int value) => (int)Math.Round(value * (DeviceDpi / 96.0));
+
+    protected override void WndProc(ref Message m)
+    {
+        base.WndProc(ref m);
+        if (m.Msg == WM_NCHITTEST && !_railMode && m.Result == (IntPtr)HTCLIENT)
+        {
+            var pos = PointToClient(new Point(m.LParam.ToInt32() & 0xFFFF, (m.LParam.ToInt32() >> 16) & 0xFFFF));
+            if (pos.X <= ScaleLogical(SidebarConfig.GripWidth))
+            {
+                m.Result = (IntPtr)HTLEFT;   // 左边缘 → 系统 resize 光标 + 拖拽调宽
+            }
+        }
+    }
+
+    private async Task InitAsync()
+    {
+        Program.Log($"form loaded: bounds={Bounds} client={ClientSize} dpi={DeviceDpi}");
+        LayoutWebView();
+        DockToRightEdge();
+
+        try
+        {
+            var dataDir = Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+                "echo-sidebar", "webview2");
+            Directory.CreateDirectory(dataDir);
+            var env = await Microsoft.Web.WebView2.Core.CoreWebView2Environment.CreateAsync(null, dataDir);
+            await _web.EnsureCoreWebView2Async(env);
+            _web.CoreWebView2.Settings.AreDevToolsEnabled = false;
+            _web.CoreWebView2.Settings.IsStatusBarEnabled = false;
+            // 页面 → 宿主的桥：窄条底部"隐藏箭头"用 window.chrome.webview.postMessage("rail-hide") 通知宿主。
+            // 走 WebView2 内置桥而不是绕 ECHO 的 HTTP + 命名管道，少一跳且不依赖 ECHO 在跑。
+            _web.CoreWebView2.WebMessageReceived += OnWebMessage;
+            _web.CoreWebView2.NewWindowRequested += (_, e) =>
+            {
+                e.Handled = true;
+                try { Process.Start(new ProcessStartInfo(e.Uri) { UseShellExecute = true }); } catch { }
+            };
+        }
+        catch (Exception ex)
+        {
+            Program.Log("WebView2 init failed: " + ex);
+            MessageBox.Show(
+                "WebView2 初始化失败：" + ex.Message + "\n\n请确认已安装 Microsoft Edge WebView2 Runtime。",
+                "ECHO 边条", MessageBoxButtons.OK, MessageBoxIcon.Error);
+        }
+
+        _railMode = _startCollapsed;
+        LayoutWebView();
+        DockToRightEdge();
+        LoadContent();
+        Show();
+        StartRailWatch();
+        Program.Log($"shown: bounds={Bounds} rail={_railMode} pending={_pendingWidth}");
+    }
+
+    /// <summary>
+    /// 处理窄条页面的消息（WebView2 桥）："rail-hide" = 点底部箭头隐藏。
+    /// 注意：消息在 UI 线程上到达（WebView2 事件即宿主线程），可直接操作窗体。
+    /// </summary>
+    private void OnWebMessage(object sender, Microsoft.Web.WebView2.Core.CoreWebView2WebMessageReceivedEventArgs e)
+    {
+        string msg;
+        try { msg = e.TryGetWebMessageAsString(); }
+        catch (Exception ex) { Program.Log("web message not a string: " + ex.Message); return; }
+        Program.Log("web message: " + msg);
+        if (string.Equals(msg, "rail-hide", StringComparison.OrdinalIgnoreCase)) HideRail();
+        else if (string.Equals(msg, "rail-show", StringComparison.OrdinalIgnoreCase)) ShowRail("page requested");
+        // 展开态仪表盘右下角箭头：把面板收成折叠条（与 rail-hide 的区别是整窗变窄条）
+        else if (string.Equals(msg, "rail-collapse", StringComparison.OrdinalIgnoreCase)) Collapse();
+    }
+
+    // ------------------------------------------- 窄条：底部箭头隐藏 + 鼠标贴边唤回
+    /// <summary>启动窄条监视定时器（200ms 轮询鼠标位置；WebView2 会吞鼠标事件，轮询最可靠）。</summary>
+    private void StartRailWatch()
+    {
+        if (_railTimer != null) return;
+        _railTimer = new System.Windows.Forms.Timer { Interval = 200 };
+        _railTimer.Tick += (_, _) => RailWatchTick();
+        _railTimer.Start();
+    }
+
+    /// <summary>鼠标是否贴到屏右缘的"唤回带"（隐藏态只剩 3px 时用）。</summary>
+    private bool CursorNearScreenEdge()
+    {
+        var pos = Cursor.Position;
+        var area = PrimaryWorkArea();
+        return pos.X >= area.Right - ScaleLogical(SidebarConfig.RailWakeMargin)
+               && pos.Y >= area.Top && pos.Y <= area.Bottom;
+    }
+
+    /// <summary>隐藏窄条：只留 RailPeekWidth 在屏右缘（点底部箭头 / rail-hide 信号触发）。</summary>
+    internal void HideRail()
+    {
+        if (!_railMode || !_railVisible) return;
+        _railVisible = false;
+        // 点箭头时鼠标正贴在屏右缘，若不先解除武装会在下一次 tick 立刻弹回来
+        _railWakeArmed = !CursorNearScreenEdge();
+        SlideRailTo(ToPhysical(SidebarConfig.RailPeekWidth), "hide");
+    }
+
+    /// <summary>唤回/保持窄条显示（贴屏右缘、rail-show 信号）。</summary>
+    internal void ShowRail(string reason)
+    {
+        if (!_railMode || _railVisible) return;
+        _railVisible = true;
+        SlideRailTo(ToPhysical(SidebarConfig.RailWidth), reason);
+    }
+
+    // ---- 滑出/滑入动画（用户 2026-09-12 要求"鼠标贴边滑出"）----
+    // 关键点：动画期间 WebView 保持"展开后"的宽度、Left 跟着窗口左缘走，超出部分由父窗口裁剪，
+    // 于是内容整体平移（抽屉从屏幕右缘滑出/滑入）；若让 WebView 跟着窗口一起变窄，
+    // 每帧都要重排（内容被压扁再弹开，实测很抖）。
+    private System.Windows.Forms.Timer _railAnim;
+    private int _railAnimFrom, _railAnimTo, _railAnimStep;
+    private int _railSlideWidth;           // >0 = 动画中，WebView 按此宽度摆放
+    private const int RailAnimSteps = 9;   // 9 帧 × 16ms ≈ 145ms（实测含布局约 150~200ms）
+
+    private void SlideRailTo(int toPhysical, string reason)
+    {
+        _railAnim?.Stop();
+        if (_railAnim == null)
+        {
+            _railAnim = new System.Windows.Forms.Timer { Interval = 16 };
+            _railAnim.Tick += (_, _) => RailAnimTick();
+        }
+        _railAnimFrom = Width;             // 从当前实际宽度起步，动画中途再触发也能接上
+        _railAnimTo = toPhysical;
+        _railAnimStep = 0;
+        _railSlideWidth = ToPhysical(SidebarConfig.RailWidth);
+        Program.Log($"rail slide start: {_railAnimFrom} -> {_railAnimTo} physical ({reason})");
+        _railAnim.Start();
+    }
+
+    private void RailAnimTick()
+    {
+        _railAnimStep++;
+        double t = (double)_railAnimStep / RailAnimSteps;
+        double eased = 1 - Math.Pow(1 - t, 3);   // ease-out：起步快、收尾稳
+        int w = (int)Math.Round(_railAnimFrom + (_railAnimTo - _railAnimFrom) * eased);
+        var area = PrimaryWorkArea();
+        _docking = true;
+        try
+        {
+            Bounds = new Rectangle(area.Right - w, area.Top, Math.Max(1, w), area.Height);
+            LayoutWebView();
+        }
+        finally { _docking = false; }
+
+        if (_railAnimStep >= RailAnimSteps)
+        {
+            _railAnim.Stop();
+            _railSlideWidth = 0;
+            DockToRightEdge();               // 收尾归位：此时 WebView 宽度与窗口一致
+            Program.Log($"rail slide end: width={Width}");
+        }
+    }
+
+    /// <summary>停止动画并恢复正常布局（切到展开态/重新收起时必须调用，否则动画会继续改 Bounds）。</summary>
+    private void StopRailAnim()
+    {
+        _railAnim?.Stop();
+        _railSlideWidth = 0;
+    }
+
+    /// <summary>
+    /// 窄条状态机（每 200ms 一次）：
+    ///   显示态 —— 不做任何事（用户 2026-09-12 取消自动隐藏，改为点底部箭头手动隐藏）。
+    ///   隐藏态 —— 只剩 3px 在屏右缘；鼠标先离开贴边带、再贴边才唤回。
+    /// 为什么要"先离开再贴边"：点箭头隐藏的瞬间鼠标就在贴边带里，直接判断会立刻弹回。
+    /// </summary>
+    private void RailWatchTick()
+    {
+        if (IsDisposed) return;
+        if (!_railMode || _railVisible) return;
+
+        if (!_railWakeArmed)
+        {
+            if (!CursorNearScreenEdge()) _railWakeArmed = true;
+            return;
+        }
+        if (CursorNearScreenEdge()) ShowRail("cursor near screen edge");
+    }
+
+    private void LoadContent()
+    {
+        try
+        {
+            if (_railMode)
+            {
+                if (!string.IsNullOrEmpty(_railPath) && File.Exists(_railPath))
+                {
+                    var uri = new Uri(_railPath).AbsoluteUri;
+                    // 换页/重复加载同一地址时 WebView2 不会重新导航，加个无意义 query 强制刷新
+                    _web.CoreWebView2?.Navigate(uri + "?t=" + DateTime.Now.Ticks);
+                    return;
+                }
+                _web.CoreWebView2?.NavigateToString(RailFallbackHtml(SidebarConfig.RailVisualShift));
+                return;
+            }
+            _web.CoreWebView2?.Navigate(_baseUrl);
+        }
+        catch (Exception ex) { Program.Log("navigate failed: " + ex.Message); }
+    }
+
+    // ------------------------------------------------------------- 吸附/尺寸
+    private static Rectangle PrimaryWorkArea()
+    {
+        return Screen.PrimaryScreen?.WorkingArea ?? new Rectangle(0, 0, 1920, 1080);
+    }
+
+    /// <summary>
+    /// 逻辑像素 → 物理像素的换算系数（本机 150% 缩放 = 1.5）。
+    /// 为什么需要：本进程声明了 PerMonitorV2（DeviceDpi=144），`Screen.WorkingArea` 给的是
+    /// **物理**空间（2560×1528），而把"设计用的逻辑宽度"直接当作 Bounds 的宽度时，
+    /// 窗体实际按**逻辑/DIP**空间落位 → 100 逻辑宽变成 150 物理宽，右边缘多出 50 物理像素
+    /// 被推出屏外（2026-09-12 用户截图：左侧 logo 紧贴左缘、右侧被裁）。
+    /// </summary>
+    private double DpiScale() => DeviceDpi / 96.0;
+
+    private int ToPhysical(double logical) => (int)Math.Round(logical * DpiScale());
+
+    private int DesiredWidth()
+    {
+        var area = PrimaryWorkArea();
+        // 展开宽度记忆值是"逻辑像素"（与 --width 参数、用户拖拽输入同一空间）
+        var max = Math.Max(SidebarConfig.MinPanelWidth, area.Width / DpiScale() - SidebarConfig.MinLeftPad);
+        return (int)Math.Clamp(_pendingWidth, SidebarConfig.MinPanelWidth, max);
+    }
+
+    private void DockToRightEdge()
+    {
+        if (IsDisposed) return;
+        var area = PrimaryWorkArea();
+        // 窄条有三种状态：显示态 RailWidth / 隐藏态只留 RailPeekWidth / 展开态按记忆宽度。
+        // 三者都是"逻辑像素"，统一换算成物理像素后再算 Bounds（见 DpiScale 注释）。
+        int logicalW;
+        if (_railMode) { logicalW = _railVisible ? SidebarConfig.RailWidth : SidebarConfig.RailPeekWidth; }
+        else { logicalW = DesiredWidth(); }
+        var w = ToPhysical(logicalW);
+        _docking = true;
+        try
+        {
+            Bounds = new Rectangle(area.Right - w, area.Top, w, area.Height);
+            LayoutWebView();
+        }
+        finally { _docking = false; }
+        Program.Log($"docked: rail={_railMode} visible={_railVisible} wanted={w} bounds={Bounds} client={ClientSize} dpi={DeviceDpi}");
+    }
+
+    private void OnResized()
+    {
+        // 程序性吸附/子控件布局都会走到这里：只重排把手并保持贴右缘，
+        // 绝不在这里记忆宽度（那是 ResizeEnd 的职责）。
+        if (_docking) return;
+        LayoutWebView();
+        if (_railMode) DockToRightEdge();
+    }
+
+    // ------------------------------------------------------------- 热键行为
+    public void ToggleFromHotkey()
+    {
+        Program.Log($"toggle from hotkey: visible={Visible} rail={_railMode}");
+        if (!Visible || _railMode) { Expand(); return; }
+        Collapse();
+    }
+
+    public void Expand()
+    {
+        StopRailAnim();           // 动画中按热键展开：先停掉动画，否则动画会继续按窄条宽度改 Bounds
+        _railMode = false;
+        _railVisible = true;      // 回到展开态：窄条状态复位
+        LayoutWebView();
+        DockToRightEdge();
+        if (!Visible) Show();
+        BringToFront();
+        Activate();
+        LoadContent();
+    }
+
+    public void Collapse()
+    {
+        StopRailAnim();
+        // 记住"展开态宽度"供下次展开还原。注意 Width 是**物理**像素、_pendingWidth 是**逻辑**像素，
+        // 必须除以 DpiScale()：否则每次收起→展开宽度都会乘一次缩放系数
+        // （2026-09-12 用户报"宽度记忆没了"：150% 缩放下 400 逻辑 → 收起 → 展开变 600 逻辑 = 900 物理）。
+        if (!_railMode) _pendingWidth = Math.Max(SidebarConfig.MinPanelWidth, (int)Math.Round(Width / DpiScale()));
+        _railMode = true;
+        _railVisible = true;                       // 收起后先显示，之后由底部箭头手动隐藏
+        _railWakeArmed = !CursorNearScreenEdge();
+        LayoutWebView();
+        DockToRightEdge();
+        LoadContent();
+        if (!Visible) Show();
+        StartRailWatch();
+    }
+
+    /// <summary>兜底窄条页面（找不到 web/rail.html 时用）。padLeft 为左补偿像素。</summary>
+    private static string RailFallbackHtml(int padLeft) => $$"""
+        <html><head><meta charset="utf-8"><style>
+        html,body{margin:0;height:100%;background:#18181b;color:#e4e4e7;
+        font:12px/1.6 "Microsoft YaHei",system-ui;display:flex;align-items:center;justify-content:center;
+        padding-left:{{padLeft}}px;box-sizing:border-box}
+        .t{writing-mode:vertical-rl;letter-spacing:.25em}
+        </style></head><body><div class="t">ECHO 仪表盘</div></body></html>
+        """;
+}

@@ -1,0 +1,13 @@
+# ECHO 直接依赖（重建 venv 用；torch/CUDA 等重依赖与安装顺序见 docs/DEPLOY.md）
+# 安装方式见 scripts/setup.ps1
+fastapi>=0.115
+uvicorn[standard]>=0.30
+pydantic>=2.7
+faster-whisper>=1.1
+funasr>=1.2
+sherpa-onnx>=1.10
+sounddevice>=0.5
+soundfile>=0.12
+numpy>=1.26
+edge-tts>=7.0
+pyannote.audio>=4.0

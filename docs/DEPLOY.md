@@ -1,0 +1,117 @@
+# 部署指南（Windows）
+
+从零把 ECHO 跑起来。全程只需要 Windows 10/11 + Python；**执行指令 / 生成纪要**这一步需要另外装
+[DSH Desktop](https://github.com/NeoBigZhou)（可选，不装也能用转写、会议、面板）。
+
+---
+
+## 0. 前置
+
+| 项 | 要求 | 说明 |
+|---|---|---|
+| 系统 | Windows 10/11 x64 | 麦克风、Edge WebView2 Runtime（边条要用，Win11 自带） |
+| Python | **3.11**（3.12+ 部分依赖尚未适配） | 建议 [uv](https://docs.astral.sh/uv/)：`uv python install 3.11` |
+| 显卡 | 可选 | NVIDIA 显卡 + CUDA 会显著加快转写；没有就自动走 CPU |
+| 磁盘 | ≥ 10 GB 空闲 | venv（含 torch/cu128 约 5–7 GB）+ 模型（按需下载） |
+
+> **路径尽量全英文**：`D:\ECHO` ✅ ／ `D:\学习\ECHO` ❌。
+> 少数原生依赖（nagisa/dynet、部分 funasr 组件）读不了非 ASCII 路径。
+> 若必须放在中文路径下：另建一个 ASCII 目录联接指向该 venv，并把解释器路径写进环境变量
+> `ECHO_PYTHON`（所有脚本都优先使用它）：
+> ```powershell
+> New-Item -ItemType Junction -Path C:\echo-venv -Target D:\学习\ECHO\venv
+> setx ECHO_PYTHON C:\echo-venv\Scripts\python.exe
+> ```
+
+## 1. 取代码 + 建 venv
+
+```powershell
+git clone https://github.com/NeoBigZhou/echo-voice-assistant.git
+cd echo-voice-assistant
+
+python -m venv venv
+.\venv\Scripts\python.exe -m pip install --upgrade pip
+.\venv\Scripts\python.exe -m pip install -r requirements.txt
+
+# 有 NVIDIA 显卡（推荐）：
+.\venv\Scripts\python.exe -m pip install torch --index-url https://download.pytorch.org/whl/cu128
+# 纯 CPU：跳过上面这行，torch 会以 CPU 版安装（转写仍可用，慢一些）
+```
+
+> 装依赖**一律**用 `python -m pip`，不要直接跑 `venv\Scripts\pip.exe`（那个 exe 里写死了创建
+> venv 时的解释器路径，挪过机器就会报 `Fatal Python error: init_fs_encoding`）。
+> 同理，如果你是从别人的机器整包拷来的 venv，先跑 `scripts\new-machine-setup.ps1` 修 `pyvenv.cfg`
+> 里的 `home` 指向。
+
+## 2. 初始化 + 启动
+
+```powershell
+powershell -File scripts\setup.ps1               # 校验 venv / 补依赖 / 检查模型 / 建库
+powershell -File scripts\start.ps1 -Background   # 后台启动（无窗口）
+# 面板：http://127.0.0.1:8970
+```
+
+- 开机自启：`powershell -File scripts\install-autostart.ps1`（卸载加 `-Remove`）
+- 停：`powershell -File scripts\stop.ps1`　重启：`powershell -File scripts\restart-echo.ps1`
+- 前台看日志：`powershell -File scripts\start.ps1`（Ctrl+C 结束）
+- 日志文件：`data\logs\echo-server.log`、`data\logs\echo-server.log.err`
+
+## 3. 模型
+
+仓库不含模型。面板 → **设置 → 模型** 会列出每一项的**体积 / 落地路径 / 是否就绪 / 获取方式**：
+
+| 模型 | 体积 | 怎么拿 |
+|---|---|---|
+| SenseVoice（默认转写引擎） | ~896 MB | 面板点「下载」（ModelScope 缓存）；不点也行，首次转写会自动下 |
+| Whisper 各档（tiny…large-v3） | 75 MB – 2.9 GB | 面板点「下载」（HF 镜像 `hf-mirror.com`） |
+| Qwen3-ASR 0.6B + 强制对齐 | ~3.6 GB | 面板点「下载」，或 `powershell -File scripts\install-qwen3asr.ps1`（同时装依赖） |
+| sherpa-onnx 流式 zipformer | ~189 MB | 面板点「下载」 |
+| 说话人分离（pyannote） | ~31 MB | **自行获取**：上游是 HF gated 模型（需同意条款），拿到后按面板给的路径放好 |
+| 唤醒词 KWS | ~39 MB | **自行获取**：从 sherpa-onnx 的 KWS 模型放成面板给的四个文件名 |
+
+内网环境连不上外网时：把另一台机器上已经就绪的 `models/` 目录（或 ModelScope 缓存
+`~/.cache/modelscope/models`）按同样的相对路径拷过来即可。
+
+## 4. 接上 DSH Desktop（可选，用来"执行指令/写纪要"）
+
+1. 安装并启动 DSH Desktop，在其设置里**放开本机访问**（ECHO 默认连 `http://127.0.0.1:43120`）。
+2. 面板 → 启动 → `DSH 执行引擎` 应为在线；不在线可点「启动」/「重试」。
+3. 想让 DSH 启动时顺便守护 ECHO（并在 DSH 升级后自动重装插件）：
+
+```powershell
+powershell -File scripts\install-echo-host-plugin.ps1          # 部署 + 自检
+powershell -File scripts\install-echo-host-plugin.ps1 -Uninstall
+```
+
+部署脚本会把 `plugin/echo-host/` 拷到 `<DSH 安装目录>\resources\app.asar.unpacked\echo-host\`，
+写一份 `echo-root.txt`（插件据此找到本仓库），并在 DSH 的**活动 Profile** 补丁层
+`%USERPROFILE%\.dsh\profiles\<active>\cordis.patch.yml` 里维护注册行。改完源码要重跑，并**重启 DSH** 才生效。
+
+## 5. 右缘边条（可选）
+
+```powershell
+dotnet build sidebar\echo-sidebar.csproj -c Release
+# 产物：sidebar\bin\Release\net7.0-windows\win-x64\echo-sidebar.exe
+```
+
+热键 `Ctrl+Shift+E` 切换面板；折叠态是一条 64px 功能条（录音 / 电平 / 说话 / 服务状态灯 / 隐藏箭头）。
+边条宽度、热键、打开方式都在面板 → 设置 → 语音与命令 里改。
+
+## 6. 排错
+
+| 症状 | 原因 / 处理 |
+|---|---|
+| `Fatal Python error: init_fs_encoding` | venv 是从别的机器拷来的，`pyvenv.cfg` 的 `home` 指向不存在的 Python。跑 `scripts\new-machine-setup.ps1` |
+| 启动时提示"模型缺失" | 见第 3 节；面板 → 设置 → 模型 里看每个模型的落地路径 |
+| 转写很慢 | 装了 CUDA 版 torch 吗？面板 → 启动 → `命令转写引擎` 的详情会显示 `cuda:0` 还是 CPU |
+| 热键没反应 | 面板 → 启动 → `热键/媒体键` 状态；热键由 ECHO 服务注册，改完设置需重启 ECHO |
+| `.ps1` 脚本报"字符串缺少终止符" | 脚本被存成了**无 BOM 的 UTF-8 且含非 ASCII**，PowerShell 5.1 按 ANSI 读就会坏。本仓库脚本一律纯 ASCII 或带 BOM，见 [powershell-编码与脚本经验.md](powershell-编码与脚本经验.md) |
+| 面板显示"连接失败" | ECHO 没起来 / 端口被占。看 `data\logs\echo-server.log.err`，或 `scripts\restart-echo.ps1` |
+
+## 附：端口一览
+
+| 端口 | 用途 |
+|---|---|
+| 8970 | ECHO 服务 + 控制面板 + REST API |
+| 43120 | DSH Desktop 本地 API（ECHO 连它执行指令） |
+| 8899 | 模型容灾代理（可选，见 [dsh-failover/README.md](../dsh-failover/README.md)） |

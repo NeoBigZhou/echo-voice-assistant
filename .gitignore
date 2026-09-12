@@ -1,0 +1,56 @@
+# ---- Python ----
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# ---- 虚拟环境（自建，不入库）----
+venv/
+.venv/
+
+# ---- 本地模型（体积大：用面板「设置 → 模型」下载，或按面板给的路径自行拷贝）----
+models/
+
+# ---- 运行时数据（录音、数据库、历史、日志）----
+data/
+*.db
+*.db-wal
+*.db-shm
+*.sqlite
+*.sqlite3
+
+# ---- 日志与进程文件 ----
+*.log
+*.pid
+logs/
+
+# ---- 容灾代理：真实配置与运行时 ----
+dsh-failover/config.json
+dsh-failover/logs/
+dsh-failover/__pycache__/
+
+# ---- 本地设置/凭据（严禁入库）----
+secrets/
+.dsh/secrets/
+*.secret
+*.env
+*.bak
+*.bak-*
+settings.yaml
+.credentials.yaml
+
+# ---- 插件部署产物（安装脚本运行时写入）----
+plugin/echo-host/echo-root.txt
+
+# ---- 编辑器 / 系统 ----
+.DS_Store
+Thumbs.db
+desktop.ini
+.idea/
+.vscode/
+
+# ---- .NET 边条构建产物：只入库源码 ----
+sidebar/bin/
+sidebar/obj/

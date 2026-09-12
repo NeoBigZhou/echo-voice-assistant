@@ -1,0 +1,146 @@
+# -*- coding: utf-8 -*-
+"""main.py — ECHO 服务入口（FastAPI 应用工厂 + 启动）
+
+启动流程：建库/迁移 → 种子配置 → 写 pid → 状态上报 → 按配置拉起监听器。
+静态托管：/ 与 /web/* 指向 web/（控制面板 SPA）。
+运行：python -m app.main  （默认 http://127.0.0.1:8970）
+"""
+import os
+import sys
+import threading
+from contextlib import asynccontextmanager
+
+# 输出被 -RedirectStandardOutput 重定向到文件后默认是块缓冲，
+# 导致 print 日志迟迟不落盘。改成行缓冲，日志即时可见。
+try:
+    sys.stdout.reconfigure(line_buffering=True)
+    sys.stderr.reconfigure(line_buffering=True)
+except Exception:
+    pass
+
+# 原生崩溃兜底诊断：注册 SIGSEGV/SIGABRT 等处理器，进程崩溃（访问冲突/
+# 堆损坏等）时把各线程 Python 栈写入 faulthandler.log，用于定位崩溃点。
+# （原生库内部崩溃可能不触发，但能覆盖大部分 Python→原生调用栈场景。）
+try:
+    import faulthandler
+    _FH_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    _FH_PATH = os.path.join(_FH_DIR, "data", "logs", "faulthandler.log")
+    os.makedirs(os.path.dirname(_FH_PATH), exist_ok=True)
+    with open(_FH_PATH, "a", encoding="utf-8") as _fh:
+        _fh.write(f"\n===== ECHO 启动 {__import__('datetime').datetime.now()} =====\n")
+        _fh.flush()
+    faulthandler.enable(open(_FH_PATH, "a", encoding="utf-8"), all_threads=True)
+except Exception:
+    pass
+
+from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
+
+import app.db as db
+from app.config import settings
+from app import manager, runtime, services
+from app.api import router
+
+BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+WEB_DIR = os.path.join(BASE_DIR, "web")
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # ---- 阶段 0：只做轻量初始化，面板立即可用 ----
+    db.init()
+    settings.seed_defaults()
+    manager.echo_write_pid()
+    services.report_server()
+
+    import app.boot as boot
+    boot.setup()
+    boot.start_all_async()   # 后台分阶段拉起其余组件，不阻塞 yield
+
+    db.add_log("info", "server", "ECHO 面板已启动（后台组件拉起中）")
+    yield
+    # ---- 关闭 ----
+    runtime.stop_all()
+    db.add_log("info", "server", "ECHO 服务已停止")
+
+
+def create_app():
+    app = FastAPI(title="ECHO 个人助理", version="0.1.0", lifespan=lifespan)
+
+    # 移动端/面板同源均可访问（未来手机 App 需要）
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=["*"],
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
+    app.include_router(router)
+
+    # 静态面板：禁用缓存（no-store），避免浏览器缓存旧版 app.js/index.html 导致面板异常
+    if os.path.isdir(WEB_DIR):
+        from fastapi import HTTPException
+
+        @app.get("/web/{path:path}")
+        def web_static(path: str):
+            # 防路径穿越
+            target = os.path.realpath(os.path.join(WEB_DIR, path))
+            if not target.startswith(os.path.realpath(WEB_DIR)) or not os.path.isfile(target):
+                raise HTTPException(status_code=404, detail="Not Found")
+            return FileResponse(target, headers={"Cache-Control": "no-store"})
+
+    @app.get("/")
+    def index():
+        return FileResponse(os.path.join(WEB_DIR, "index.html"),
+                            headers={"Cache-Control": "no-store"})
+
+    # PWA：manifest 与 Service Worker 需从根路径提供（SW scope 覆盖全站）
+    @app.get("/manifest.json")
+    def pwa_manifest():
+        return FileResponse(os.path.join(WEB_DIR, "manifest.json"),
+                            headers={"Cache-Control": "no-store"})
+
+    @app.get("/sw.js")
+    def pwa_sw():
+        return FileResponse(os.path.join(WEB_DIR, "sw.js"),
+                            headers={"Cache-Control": "no-store"})
+
+    @app.get("/health")
+    def health():
+        return {"ok": True}
+
+    return app
+
+
+app = create_app()
+
+
+def main():
+    import socket
+    import uvicorn
+    db.init()
+    port = int(settings.get("serverPort", 8970))
+    # 防重复实例：若端口已被其他 ECHO 实例监听（echo-host 守护误判后拉起的
+    # 重复实例、手动重复启动等），本进程为冗余 —— 尽早退出，避免：
+    #   1) 抢占端口失败白加载模型（GPU/CPU 浪费）；
+    #   2) 启动恢复把活实例正在录的会议误标为 interrupted。
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    s.settimeout(0.5)
+    try:
+        occupied = s.connect_ex(("127.0.0.1", port)) == 0
+    finally:
+        s.close()
+    if occupied:
+        print(f"检测到端口 {port} 已被其他 ECHO 实例占用，本实例退出（重复实例）")
+        try:
+            db.add_log("warn", "server",
+                       f"启动中止：端口 {port} 已被其他 ECHO 实例占用（重复实例）")
+        except Exception:
+            pass
+        sys.exit(0)
+    print(f"ECHO 服务启动: http://127.0.0.1:{port}")
+    uvicorn.run(app, host="127.0.0.1", port=port, log_level="info")
+
+
+if __name__ == "__main__":
+    main()

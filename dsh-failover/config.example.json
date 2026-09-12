@@ -1,0 +1,14 @@
+{
+  "host": "127.0.0.1",
+  "port": 8899,
+  "internal_url": "https://your-intranet-gateway.example.com/v1/chat/completions",
+  "internal_model": "your-internal-model-name",
+  "internal_user_id": "your-user-id",
+  "public_url": "https://api.deepseek.com/chat/completions",
+  "public_model": "deepseek-chat",
+  "connect_timeout": 6.0,
+  "first_byte_timeout": 30.0,
+  "read_timeout": 360.0,
+  "write_timeout": 120.0,
+  "fallback_on_5xx": false
+}

@@ -1,0 +1,744 @@
+# -*- coding: utf-8 -*-
+"""api.py — ECHO REST API（面板 / 手机 App / DSH skill / CLI 的统一入口）
+
+鉴权：settings.apiAuthEnabled=false（默认）时全开放（仅本机）；
+开启后除 /api/status 外均要求 `Authorization: Bearer <token>`（api_keys 表）。
+"""
+import os
+import tempfile
+
+from fastapi import APIRouter, Depends, File, Form, Header, HTTPException, Request, UploadFile
+from pydantic import BaseModel
+
+import app.db as db
+from app.config import settings
+from app import assistant, manager, meeting, runtime, services, worklog
+from app.audio import recorder
+from app.audio import stt as stt_mod
+from app.audio import tts as tts_mod
+
+router = APIRouter(prefix="/api")
+
+
+# ---------------------------------------------------------------- 音频转 16k wav（外部转写用）
+def _audio_to_wav16k(src_path, dst_path):
+    """任意音频（wav/mp3/flac…）→ 16kHz 单声道 PCM wav。"""
+    import numpy as np
+    import soundfile as sf
+    import soxr
+    data, sr = sf.read(src_path, dtype="float32", always_2d=True)
+    if data.shape[1] > 1:
+        data = data.mean(axis=1, keepdims=True)
+    mono = data[:, 0]
+    if sr != 16000:
+        mono = soxr.resample(mono, sr, 16000)
+    sf.write(dst_path, mono, 16000, subtype="PCM_16")
+
+
+# ---------------------------------------------------------------- 鉴权
+def optional_auth(authorization: str = Header(default="")):
+    if not settings.get("apiAuthEnabled", False):
+        return None
+    token = ""
+    if authorization.startswith("Bearer "):
+        token = authorization[7:].strip()
+    row = db.verify_api_key(token) if token else None
+    if not row:
+        raise HTTPException(status_code=401, detail="无效或缺失 API 密钥")
+    return row
+
+
+# ---------------------------------------------------------------- 模型
+class CommandIn(BaseModel):
+    text: str
+    source: str = "web"
+    workspace: str = ""
+    session_id: str = ""
+
+
+class CaptureIn(BaseModel):
+    source: str = "api"
+
+
+class SettingsIn(BaseModel):
+    values: dict
+
+
+class SpeakerRenameIn(BaseModel):
+    label: str
+    name: str
+
+
+class SpeakerMergeIn(BaseModel):
+    source: str
+    target: str
+
+
+class LineUpdateIn(BaseModel):
+    text: str
+
+
+class LineKindIn(BaseModel):
+    kind: str
+
+
+class SummaryRegenIn(BaseModel):
+    extra: str = ""
+
+
+class CleanShortIn(BaseModel):
+    max_minutes: float = 2
+
+
+class ModelDownloadIn(BaseModel):
+    id: str
+    force: bool = False      # 已就绪时只有 force=True 才重下（界面上的「重新下载」）
+
+
+class WorklogIn(BaseModel):
+    # 面板「归档要求」自由文本；旧字段名 project 继续兼容（同一个语义位置）
+    archive_hint: str = ""
+    project: str = ""
+
+
+class KeyCreateIn(BaseModel):
+    name: str = "mobile"
+
+
+class GuardLogIn(BaseModel):
+    """echo-host 守护进程关键事件上报（面板「守护进程关键事件」栏数据源）。
+
+    支持单条 {level, message} 或批量 {events: [{level, message}, ...]}。
+    正常刷屏信息（ECHO stderr 转发、健康检查等）由 echo-host 侧过滤，不上报。
+    """
+    level: str = "info"
+    message: str = ""
+    events: list[dict] | None = None
+
+
+# ---------------------------------------------------------------- 状态与配置
+@router.get("/status")
+def api_status(_auth=Depends(optional_auth)):
+    dsh_ok = manager.dsh_ready()
+    services.report_dsh("online" if dsh_ok else "offline",
+                        "API 可访问" if dsh_ok else "未运行")
+    st = meeting.meeting_status()
+    # 转写引擎加载状态（detail 展示）
+    stt_st = stt_mod.engine_status()
+    loaded_desc = ", ".join(f"{e.get('engine')}" for e in stt_st["loaded"]) or "未加载"
+    services.report_stt("online" if stt_st["loaded"] else "ready",
+                        f"{loaded_desc} · {stt_st['device']}")
+    return {
+        "components": services.snapshot(),
+        "dsh": {"online": dsh_ok},
+        "stt": stt_st,
+        "meeting": st,
+        "busy": assistant.is_busy(),
+        "busyOwner": assistant._busy_owner["name"],
+        # 命令流当前阶段（listening/transcribing/running）：面板据此给"说话"按钮做动效
+        "busyPhase": assistant._busy_owner.get("phase"),
+        "uptime": services.uptime(),
+        "version": "0.1.0",
+    }
+
+
+# ---------------------------------------------------------------- 模型容灾代理（只读转发）
+# 容灾代理地址（dsh-failover/proxy.py 默认端口）。代理未运行时不报错，返回 offline 结构。
+FAILOVER_HEALTH_URL = "http://127.0.0.1:8899/health"
+
+
+@router.get("/failover/health")
+def api_failover_health(_auth=Depends(optional_auth)):
+    """只读转发容灾代理 /health：返回路由统计（内网/公网/失败、最近一次、切换历史）。
+
+    面板仪表盘小卡片与该页签共用此端点（同源，避免跨端口 CORS）。
+    """
+    try:
+        import httpx
+        resp = httpx.get(FAILOVER_HEALTH_URL, timeout=3)
+        resp.raise_for_status()
+        data = resp.json()
+        data["proxy_online"] = True
+        return data
+    except Exception as exc:  # 代理未启动 / 端口不通 → 给前端一个稳定的 offline 结构
+        return {
+            "proxy_online": False,
+            "status": "offline",
+            "error": str(exc),
+            "routes": {"requests": 0, "internal": 0, "public": 0, "failed": 0,
+                       "last_route": None, "last_route_at": None},
+            "history": [],
+        }
+
+
+@router.get("/settings")
+def get_settings(_auth=Depends(optional_auth)):
+    return {"settings": settings.all()}
+
+
+@router.put("/settings")
+def put_settings(body: SettingsIn, _auth=Depends(optional_auth)):
+    updated = settings.update(body.values)
+    # 配置变更后的联动
+    if any(k.startswith("wake") for k in updated):
+        runtime.stop_wake()
+        if settings.get("wakeEnabled", False):
+            runtime.start_wake()
+    return {"ok": True, "updated": updated}
+
+
+@router.post("/settings/reset")
+def reset_settings(key: str = "", _auth=Depends(optional_auth)):
+    settings.reset(key or None)
+    return {"ok": True}
+
+
+# ---------------------------------------------------------------- 命令
+@router.post("/assistant/command")
+def post_command(body: CommandIn, _auth=Depends(optional_auth)):
+    if not body.text.strip():
+        raise HTTPException(status_code=400, detail="命令为空")
+    ok, msg = assistant.send_text(body.text.strip(), source=body.source,
+                                  workspace=body.workspace or None,
+                                  session_id=body.session_id or None)
+    return {"ok": ok, "message": msg}
+
+
+@router.get("/dsh/targets")
+def get_dsh_targets(_auth=Depends(optional_auth)):
+    """命令发送目标：工作区列表 + 会话列表（供前端下拉选择）。"""
+    from app.dsh import get_client, DshError
+    client = get_client()
+    try:
+        workspaces = client.list_workspaces()
+        sessions = client.list_sessions_for()
+    except DshError as e:
+        raise HTTPException(status_code=503, detail=str(e))
+    return {"workspaces": workspaces, "sessions": sessions}
+
+
+@router.post("/assistant/capture")
+def post_capture(body: CaptureIn, _auth=Depends(optional_auth)):
+    ok = assistant.capture(body.source)
+    return {"ok": ok, "message": "已开始录音命令流" if ok else "已有命令流进行中"}
+
+
+@router.get("/assistant/busy")
+def get_busy(_auth=Depends(optional_auth)):
+    return {"busy": assistant.is_busy(), "owner": assistant._busy_owner["name"]}
+
+
+# ---------------------------------------------------------------- 服务运维
+@router.get("/models")
+def get_models(_auth=Depends(optional_auth)):
+    """模型清单：每个功能需要哪些模型、多大、装到哪、怎么获取，以及本地就绪状态与下载进度。
+
+    只读检测 + 任务状态（app/modelinfo.py），GET 不会触发任何下载；面板「设置 → 模型」据此渲染。
+    """
+    from app import modelinfo
+    return {"items": modelinfo.inventory(), "jobs": modelinfo.jobs()}
+
+
+@router.post("/models/download")
+def post_model_download(body: ModelDownloadIn, _auth=Depends(optional_auth)):
+    """下载指定模型（后台线程，立即返回；进度用 GET /api/models 轮询）。
+
+    只有上游有稳定下载源的才开放（sensevoice / whisper 各档 / qwen3asr）；
+    sherpa、pyannote、唤醒词 KWS 需要从源机拷贝，这里会直接拒绝并说明。
+    """
+    from app import modelinfo
+    ok, msg = modelinfo.start_download(body.id.strip(), force=bool(body.force))
+    return {"ok": ok, "message": msg}
+
+
+@router.post("/system/restart")
+def post_restart(_auth=Depends(optional_auth)):
+    """重启 ECHO 服务（面板 设置 → 服务 的按钮）。
+
+    本身不阻塞：真正的停/起交给脱离进程组的 scripts/restart-echo.ps1，
+    面板收到 ok 后轮询 /api/status 等它回来。
+    """
+    if assistant.is_busy():
+        return {"ok": False, "message": "有命令正在处理中，请稍后再重启"}
+    try:
+        from app import meeting
+        st = meeting.meeting_status()
+        if st.get("active"):
+            return {"ok": False, "message": "正在录音中，请先结束录音"}
+    except Exception:
+        pass
+    ok, msg = runtime.restart_echo()
+    return {"ok": ok, "message": msg}
+
+
+@router.get("/commands")
+def get_commands(limit: int = 100, offset: int = 0, _auth=Depends(optional_auth)):
+    return {"total": db.count_commands(),
+            "items": db.list_commands(limit=min(limit, 500), offset=max(offset, 0))}
+
+
+@router.delete("/commands")
+def del_commands(_auth=Depends(optional_auth)):
+    db.clear_commands()
+    return {"ok": True}
+
+
+# ---------------------------------------------------------------- 会话
+@router.get("/sessions")
+def get_sessions(_auth=Depends(optional_auth)):
+    return {"items": db.list_sessions()}
+
+
+# ---------------------------------------------------------------- 音频
+@router.get("/audio/devices")
+def get_audio_devices(_auth=Depends(optional_auth)):
+    try:
+        return {"devices": recorder.list_input_devices(),
+                "default": recorder.default_input_device()}
+    except Exception as e:
+        return {"devices": [], "error": str(e)}
+
+
+@router.get("/audio/level")
+def get_audio_level(_auth=Depends(optional_auth)):
+    """当前麦克风电平（面板波形）。
+
+    **不再开采样流**：会议录音中直接读录音器（MeetingRecorder）的实时电平
+    （录音线程每 0.2s 更新一次），空闲返回 0。
+
+    历史问题：此前用 sd.rec() 每次请求都开关一个 PortAudio 录音流，而面板
+    每 ~2s 轮询一次、多个面板窗口还会并发请求 → 高频开关 WASAPI 流触发
+    PortAudio 原生堆损坏，导致进程崩溃（ntdll 0xc0000005 / 0xc0000374，
+    faulthandler 栈定位到本函数）。已弃用采样方式。
+    """
+    try:
+        st = meeting.meeting_status()
+        if st.get("active"):
+            return {"level": min(1.0, float(st.get("level") or 0.0))}
+    except Exception:
+        pass
+    # 语音命令收音阶段：同一个电平回调（record_command 的 level_cb），同样不开新采样流
+    try:
+        lv = assistant.capture_level()
+        if lv > 0:
+            return {"level": min(1.0, lv)}
+    except Exception:
+        pass
+    return {"level": 0.0}
+
+
+# ---------------------------------------------------------------- 转写服务（对外 API）
+# 其他应用可上传音频调用本地转写（无需直接操作模型）：
+#   curl -F "file=@a.mp3" -F "engine=qwen3asr" http://127.0.0.1:8970/api/stt/transcribe
+async def _save_upload_wav(file: UploadFile):
+    """保存上传文件并转成 16k wav 临时文件，返回路径。"""
+    import uuid
+    from starlette.concurrency import run_in_threadpool
+    tag = f"{os.getpid()}-{uuid.uuid4().hex[:6]}"
+    # 注意：上传文件名可能也是 .wav，tmp_in 必须与 tmp_wav 不同名（否则删除输入会误删输出）
+    suffix = os.path.splitext(file.filename or "")[1] or ".wav"
+    tmp_in = os.path.join(tempfile.gettempdir(), f"echo-up{tag}.in{suffix}")
+    tmp_wav = os.path.join(tempfile.gettempdir(), f"echo-up{tag}.wav")
+    with open(tmp_in, "wb") as f:
+        f.write(await file.read())
+    try:
+        await run_in_threadpool(_audio_to_wav16k, tmp_in, tmp_wav)
+    finally:
+        try:
+            os.remove(tmp_in)
+        except Exception:
+            pass
+    return tmp_wav
+
+
+@router.get("/stt/status")
+def stt_status(_auth=Depends(optional_auth)):
+    """转写引擎加载状态（已加载引擎 / 设备）。"""
+    st = stt_mod.engine_status()
+    return {"loaded": st["loaded"], "device": st["device"], "cuda": st["cuda"]}
+
+
+@router.post("/stt/transcribe")
+async def stt_transcribe(file: UploadFile = File(...),
+                         engine: str = Form("sensevoice"),
+                         model: str = Form("small"),
+                         lang: str = Form("zh"),
+                         device: str = Form("auto"),
+                         _auth=Depends(optional_auth)):
+    """上传音频（wav/mp3/flac…）→ 转写文本。
+
+    engine: sensevoice|qwen3asr|sherpa|tiny/base/small/medium/large
+    """
+    from starlette.concurrency import run_in_threadpool
+    wav = await _save_upload_wav(file)
+    try:
+        db.add_log("debug", "api", f"stt.transcribe wav={wav} exists={os.path.isfile(wav)} engine={engine}")
+        text = await run_in_threadpool(stt_mod.transcribe, wav, engine, model, lang, device)
+        db.add_log("debug", "api", f"stt.transcribe result len={len(text)}")
+    finally:
+        try:
+            os.remove(wav)
+        except Exception:
+            pass
+    if not text:
+        raise HTTPException(status_code=422, detail="未能识别出文本（音频过短或无语音）")
+    return {"text": text, "engine": engine, "model": model}
+
+
+@router.post("/stt/sentences")
+async def stt_sentences(file: UploadFile = File(...),
+                        engine: str = Form("qwen3asr"),
+                        model: str = Form("0.6B"),
+                        lang: str = Form("zh"),
+                        device: str = Form("auto"),
+                        _auth=Depends(optional_auth)):
+    """上传音频 → 带时间戳的句子列表（qwen3asr 用 ForcedAligner 原生句子）。
+
+    返回: {"text": 全文, "sentences": [{"start": 秒, "end": 秒, "text": ...}]}
+    """
+    from starlette.concurrency import run_in_threadpool
+    wav = await _save_upload_wav(file)
+    try:
+        if engine == "qwen3asr":
+            def _q():
+                m = stt_mod._get_qwen3asr(device, f"Qwen/Qwen3-ASR-{model}",
+                                          forced_aligner="Qwen/Qwen3-ForcedAligner-0.6B")
+                return stt_mod._qwen3asr_sentences(m, wav, stt_mod._LANG_MAP.get(lang.lower(), None))
+            try:
+                text, sents = await run_in_threadpool(_q)
+            except Exception as e:
+                import traceback
+                db.add_log("error", "api", f"qwen3asr sentences 失败: {e}\n{traceback.format_exc()[:500]}")
+                raise HTTPException(status_code=500, detail=f"转写引擎错误: {e}")
+            return {"text": text,
+                    "sentences": [{"start": round(s, 2), "end": round(e, 2), "text": t}
+                                  for s, e, t in sents]}
+        text = await run_in_threadpool(stt_mod.transcribe, wav, engine, model, lang, device)
+        return {"text": text, "sentences": [{"start": 0, "end": 0, "text": text}]}
+    finally:
+        try:
+            os.remove(wav)
+        except Exception:
+            pass
+
+
+# ---------------------------------------------------------------- 会议
+@router.post("/meeting/start")
+def meeting_start(_auth=Depends(optional_auth)):
+    ok, msg = meeting.start_meeting()
+    services.report_meeting("active" if ok else "idle", msg)
+    return {"ok": ok, "message": msg}
+
+
+@router.post("/meeting/stop")
+def meeting_stop(_auth=Depends(optional_auth)):
+    ok, msg = meeting.stop_meeting()
+    services.report_meeting("transcribing" if ok else "idle", msg)
+    return {"ok": ok, "message": msg}
+
+
+@router.get("/meeting/status")
+def meeting_status(_auth=Depends(optional_auth)):
+    return meeting.meeting_status()
+
+
+@router.get("/transcribe/status")
+def transcribe_status(_auth=Depends(optional_auth)):
+    """当前转写任务进度：{meeting_id: {phase, seg_index, seg_total, percent, detail, updated_at}}"""
+    return meeting.transcribe_progress()
+
+
+@router.get("/meetings")
+def get_meetings(limit: int = 100, offset: int = 0, _auth=Depends(optional_auth)):
+    items = db.list_meetings(limit=min(limit, 500), offset=max(offset, 0))
+    # 补充 has_summary 等轻量展示字段（列表信息展示优化，2026-09-10）
+    for it in items:
+        folder = os.path.join(meeting.MEETINGS_DIR, it["name"])
+        it["has_summary"] = os.path.isfile(os.path.join(folder, "summary.md"))
+    return {"items": items}
+
+
+@router.get("/meetings/{mid}")
+def get_meeting(mid: int, _auth=Depends(optional_auth)):
+    detail = meeting.get_meeting_detail(mid)
+    if not detail:
+        raise HTTPException(status_code=404, detail="会议不存在")
+    detail["segments"] = meeting.build_segments(mid)
+    folder = os.path.join(meeting.MEETINGS_DIR, detail["name"])
+    detail["hasSegments"] = os.path.isfile(os.path.join(folder, "topics.md"))
+    return detail
+
+
+@router.get("/meetings/{mid}/audio")
+def meeting_audio(mid: int, seg: int = 1, _auth=Depends(optional_auth)):
+    """返回某段录音 wav（支持 Range，供前端同步播放）。"""
+    m = db.get_meeting(mid)
+    if not m:
+        raise HTTPException(status_code=404, detail="会议不存在")
+    path = os.path.join(meeting.MEETINGS_DIR, m["name"], f"{seg:02d}.wav")
+    if not os.path.isfile(path):
+        raise HTTPException(status_code=404, detail="音频段不存在")
+    from fastapi.responses import FileResponse
+    return FileResponse(path, media_type="audio/wav", filename=f"seg{seg:02d}.wav")
+
+
+@router.delete("/meetings/{mid}")
+def del_meeting(mid: int, _auth=Depends(optional_auth)):
+    ok, msg = meeting.delete_meeting(mid)
+    return {"ok": ok, "message": msg}
+
+
+@router.post("/meetings/clean-short")
+def clean_short_meetings(body: CleanShortIn, _auth=Depends(optional_auth)):
+    """清理时长 ≤ N 分钟的会议（含音频文件）。默认 2 分钟。"""
+    max_seconds = max(10, int(round(body.max_minutes * 60)))
+    removed = meeting.clean_short_meetings(max_seconds=max_seconds)
+    return {"ok": True, "count": len(removed), "removed": removed}
+
+
+@router.post("/meetings/{mid}/speaker/rename")
+def speaker_rename(mid: int, body: SpeakerRenameIn, _auth=Depends(optional_auth)):
+    m = db.get_meeting(mid)
+    if not m:
+        raise HTTPException(status_code=404, detail="会议不存在")
+    db.rename_speaker(mid, body.label, body.name)
+    meeting.export_transcript(mid)
+    return {"ok": True}
+
+
+@router.post("/meetings/{mid}/speaker/merge")
+def speaker_merge(mid: int, body: SpeakerMergeIn, _auth=Depends(optional_auth)):
+    m = db.get_meeting(mid)
+    if not m:
+        raise HTTPException(status_code=404, detail="会议不存在")
+    if body.source == body.target:
+        raise HTTPException(status_code=400, detail="不能合并到自身")
+    db.merge_speakers(mid, body.source, body.target)
+    meeting.export_transcript(mid)
+    return {"ok": True}
+
+
+@router.post("/meetings/{mid}/line/{line_id}")
+def line_update(mid: int, line_id: int, body: LineUpdateIn, _auth=Depends(optional_auth)):
+    db.update_line(line_id, body.text)
+    meeting.export_transcript(mid)
+    return {"ok": True}
+
+
+@router.post("/meetings/{mid}/line/{line_id}/kind")
+def line_kind(mid: int, line_id: int, body: LineKindIn, _auth=Depends(optional_auth)):
+    db.set_line_kind(line_id, body.kind)
+    return {"ok": True}
+
+
+@router.post("/meetings/{mid}/summary/regenerate")
+def summary_regen(mid: int, body: SummaryRegenIn, _auth=Depends(optional_auth)):
+    ok, msg = meeting.regenerate_summary(mid, body.extra)
+    return {"ok": ok, "message": msg}
+
+
+@router.post("/meetings/{mid}/worklog")
+def meeting_worklog(mid: int, body: WorklogIn, _auth=Depends(optional_auth)):
+    """把会议纪要归档到笔记库：委派用户自己的归档技能完成（见 docs/worklog.md）。"""
+    hint = body.archive_hint or body.project or ""
+    ok, msg = meeting.push_meeting_to_worklog(mid, archive_hint=hint)
+    return {"ok": ok, "message": msg}
+
+
+@router.get("/worklog/status")
+def worklog_status(_auth=Depends(optional_auth)):
+    """归档可用性（面板据此决定「写工作日志」是否可点）。"""
+    ok, reason = worklog.ready()
+    return {"ready": ok, "reason": reason,
+            "enabled": worklog.enabled(), "mode": worklog.mode(),
+            "vault": worklog.vault_root()}
+
+
+@router.post("/meetings/{mid}/retranscribe")
+def meeting_retranscribe(mid: int, _auth=Depends(optional_auth)):
+    ok, msg = meeting.retranscribe_meeting(mid)
+    return {"ok": ok, "message": msg}
+
+
+@router.get("/meetings/{mid}/file")
+def meeting_file(mid: int, kind: str = "transcript", _auth=Depends(optional_auth)):
+    """kind=transcript|topics|summary → 返回对应文件原文。
+    kind=summary → summary.md（markdown 纪要，前端 mdToHtml 直接渲染）；
+    kind=topics → topics.md（元数据 JSON，前端解析标题/简介/摘要/分段）。
+    兼容旧格式：summary.md 若为老结构化 JSON 则拆包成「摘要+纪要」markdown。
+    返回 {"exists", "content"}。"""
+    m = db.get_meeting(mid)
+    if not m:
+        raise HTTPException(status_code=404, detail="会议不存在")
+    path = os.path.join(meeting.MEETINGS_DIR, m["name"], f"{kind}.md")
+    if not os.path.isfile(path):
+        return {"exists": False, "content": ""}
+    with open(path, "r", encoding="utf-8") as f:
+        content = f.read()
+    if kind == "summary":
+        obj = meeting._try_load_json(content)
+        if isinstance(obj, dict) and (obj.get("会议纪要") or obj.get("会议摘要")):
+            # 旧版结构化 JSON（会议名称/会议摘要/会议纪要）→ 拼成 markdown
+            abstract = (obj.get("会议摘要") or "").strip()
+            minutes = (obj.get("会议纪要") or "").strip()
+            sec = (f"# 会议摘要\n\n{abstract}\n\n---\n\n{minutes}" if abstract else minutes)
+            return {"exists": True, "content": sec}
+    return {"exists": True, "content": content}
+
+
+# ---------------------------------------------------------------- 控制
+@router.post("/control/dsh/start")
+def control_dsh_start(_auth=Depends(optional_auth)):
+    ok, msg = manager.dsh_start()
+    return {"ok": ok, "message": msg}
+
+
+@router.post("/control/dsh/stop")
+def control_dsh_stop(_auth=Depends(optional_auth)):
+    ok, msg = manager.dsh_stop()
+    return {"ok": ok, "message": msg}
+
+
+@router.post("/control/hotkey/start")
+def control_hotkey_start(_auth=Depends(optional_auth)):
+    ok, msg = runtime.start_hotkey()
+    return {"ok": ok, "message": msg}
+
+
+@router.post("/control/panel/toggle")
+def control_panel_toggle(_auth=Depends(optional_auth)):
+    """切换仪表盘（与 panelHotkey 等价）。
+
+    面板/脚本/其他触点都可以用它验证边条：已开则收起为窄条，再调一次展开。
+    """
+    ok = runtime.toggle_sidebar()
+    return {"ok": bool(ok), "message": "已切换仪表盘" if ok else "切换失败（详见服务日志）"}
+
+
+@router.post("/control/hotkey/stop")
+def control_hotkey_stop(_auth=Depends(optional_auth)):
+    ok, msg = runtime.stop_hotkey()
+    return {"ok": ok, "message": msg}
+
+
+@router.post("/control/wake/start")
+def control_wake_start(_auth=Depends(optional_auth)):
+    ok, msg = runtime.start_wake()
+    return {"ok": ok, "message": msg}
+
+
+@router.post("/control/wake/stop")
+def control_wake_stop(_auth=Depends(optional_auth)):
+    ok, msg = runtime.stop_wake()
+    return {"ok": ok, "message": msg}
+
+
+@router.post("/control/echo/stop")
+def control_echo_stop(_auth=Depends(optional_auth)):
+    import threading
+    threading.Timer(0.5, manager.echo_stop_self).start()
+    return {"ok": True, "message": "ECHO 服务即将停止"}
+
+
+@router.post("/control/stt/unload")
+def control_stt_unload(_auth=Depends(optional_auth)):
+    """卸载全部转写引擎（释放显存）。"""
+    stt_mod.reset_engines()
+    return {"ok": True, "message": "转写引擎已卸载，显存已释放"}
+
+
+@router.post("/control/tts/test")
+def control_tts_test(_auth=Depends(optional_auth)):
+    """语音合成测试播报。"""
+    tts_mod.speak_async("你好，我是 ECHO 语音助手，当前语音合成正常。",
+                        settings.get("ttsEngine", "auto"))
+    return {"ok": True, "message": "已开始测试播报"}
+
+
+@router.post("/control/mic/test")
+def control_mic_test(_auth=Depends(optional_auth)):
+    """麦克风测试：在服务进程内打开录音 1 秒，返回设备与电平（诊断用）。"""
+    import numpy as np
+    try:
+        with recorder._open_input(int(settings.get("inputDeviceId", -1))) as stream:
+            data, _ = stream.read(int(16000 * 1.0))
+            rms = float(np.sqrt(np.mean((data.astype(np.float32) / 32768.0) ** 2)))
+            return {"ok": True, "device": stream.device, "rms": round(rms, 4)}
+    except Exception as e:
+        db.add_log("error", "api", f"mic test 失败: {e}")
+        return {"ok": False, "error": str(e)}
+
+
+# ---------------------------------------------------------------- 启动编排
+@router.get("/boot/status")
+def boot_status(_auth=Depends(optional_auth)):
+    import app.boot as boot
+    return boot.snapshot()
+
+
+@router.post("/boot/component/{cid}/start")
+def boot_component_start(cid: str, _auth=Depends(optional_auth)):
+    import app.boot as boot
+    ok, msg = boot.start_component(cid)
+    return {"ok": ok, "message": msg}
+
+
+@router.post("/boot/component/{cid}/stop")
+def boot_component_stop(cid: str, _auth=Depends(optional_auth)):
+    import app.boot as boot
+    ok, msg = boot.stop_component(cid)
+    return {"ok": ok, "message": msg}
+
+
+# ---------------------------------------------------------------- 日志 / 事件
+@router.get("/logs")
+def get_logs(limit: int = 200, level: str = "", source: str = "", _auth=Depends(optional_auth)):
+    return {"items": db.list_logs(limit=min(limit, 1000), level=level, source=source)}
+
+
+@router.post("/guard/log")
+def guard_log(body: GuardLogIn, _auth=Depends(optional_auth)):
+    """接收 echo-host 守护进程的关键事件并入库（source=guard）。
+
+    仅本机 echo-host 调用；面板「启动」页签的「守护进程关键事件」栏
+    通过 GET /api/logs?source=guard 读取。
+    """
+    allowed = {"info", "warn", "error"}
+    items = body.events if body.events is not None else [
+        {"level": body.level, "message": body.message}]
+    n = 0
+    for it in items:
+        if not isinstance(it, dict):
+            continue
+        msg = str(it.get("message", "")).strip()
+        if not msg:
+            continue
+        lv = str(it.get("level", "info")).lower()
+        if lv not in allowed:
+            lv = "info"
+        db.add_log(lv, "guard", msg)
+        n += 1
+    return {"ok": True, "count": n}
+
+
+@router.get("/events")
+def get_events(limit: int = 100, _auth=Depends(optional_auth)):
+    return {"items": db.list_events(limit=min(limit, 500))}
+
+
+# ---------------------------------------------------------------- API 密钥（移动端预留）
+@router.post("/keys")
+def create_key(body: KeyCreateIn, _auth=Depends(optional_auth)):
+    token = db.add_api_key(body.name)
+    return {"ok": True, "token": token, "name": body.name}
+
+
+@router.get("/keys")
+def list_keys(_auth=Depends(optional_auth)):
+    return {"items": db.list_api_keys()}
+
+
+@router.delete("/keys/{kid}")
+def delete_key(kid: int, _auth=Depends(optional_auth)):
+    db.delete_api_key(kid)
+    return {"ok": True}

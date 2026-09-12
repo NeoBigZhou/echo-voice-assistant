@@ -1,0 +1,1414 @@
+# -*- coding: utf-8 -*-
+"""meeting.py — ECHO 会议业务（录音 → 分段 → 转写 → 说话人分离 → 纪要）
+
+编排（去掉旧实现的 http.server 耦合，数据全部入库）：
+  start_meeting()   开录音线程（MeetingRecorder，按分钟分段）
+  stop_meeting()    停录 → 后台转写（whisper 或 sensevoice）
+                      → 可选 pyannote 说话人分离 → 写入 DB（lines/speakers）
+                      → 导出 transcript.md → 可选请求 DSH 生成纪要
+  regenerate_summary() / retranscribe_meeting()  手动重跑
+
+文件布局：data/meetings/<2026-08-21_10-00-00>/{01.wav, meta.json, transcript.md, summary.md}
+"""
+import datetime
+import json
+import os
+import re
+import sys
+import threading
+import time
+
+import app.db as db
+from app.config import settings
+from app.dsh import get_client
+from app import worklog
+from app.audio.recorder import MeetingRecorder
+from app.audio import stt as stt_mod
+from app.audio import tts as tts_mod
+from app import services
+
+BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+MEETINGS_DIR = os.path.join(BASE_DIR, "data", "meetings")
+SAMPLE_RATE = 16000
+
+os.makedirs(MEETINGS_DIR, exist_ok=True)
+
+# ---------------------------------------------------------------- 状态
+
+_state = {
+    "active": False,
+    "folder": None,
+    "recorder": None,
+    "started_at": None,
+    "level": 0.0,
+    "error": "",
+}
+# 录音状态锁：start/stop 必须原子化 —— 否则并发 stop（如面板按钮双击/重复请求）
+# 会同时通过 active 检查，造成重复转写 + 重复纪要（日志里出现过两次“停止录音”同秒）。
+_state_lock = threading.Lock()
+_retranscribing = {"set": set(), "lock": threading.Lock()}
+
+# 转写进度：meeting_id -> {phase, seg_index, seg_total, percent, detail, updated_at}
+_transcribe_progress = {}
+_progress_lock = threading.Lock()
+
+
+def _set_progress(meeting_id, **kw):
+    with _progress_lock:
+        _transcribe_progress[meeting_id] = {**_transcribe_progress.get(meeting_id, {}),
+                                            **kw, "updated_at": time.time()}
+
+
+def _clear_progress(meeting_id):
+    with _progress_lock:
+        _transcribe_progress.pop(meeting_id, None)
+
+
+def transcribe_progress(meeting_id=None):
+    """返回转写进度（无参会话返回全部）。"""
+    with _progress_lock:
+        if meeting_id is not None:
+            p = _transcribe_progress.get(meeting_id)
+            return dict(p) if p else None
+        return {k: dict(v) for k, v in _transcribe_progress.items()}
+
+
+def meeting_status():
+    return {
+        "active": _state["active"],
+        "folder": os.path.basename(_state["folder"]) if _state["folder"] else None,
+        "startedAt": _state["started_at"],
+        "level": _state["level"],
+        "error": _state["error"],
+    }
+
+
+def recover_orphaned_meetings():
+    """启动恢复：进程重启后，数据库里残留的 recording/transcribing 会议
+    已不可能仍在录/在转写（内存状态已丢失），统一标记为 interrupted。
+    音频文件保留，可进会议详情手动「重新转写」。
+
+    防误伤说明：重复实例（守护误判拉起、手动重复启动等）已在 app/main.py
+    入口处通过「服务端口占用探测」拦截退出，根本走不到本函数 —— 能执行到
+    这里的实例必然已成功绑定服务端口、是当前唯一的 ECHO 实例，因此 DB 里
+    残留的 recording 会议一定是崩溃残留，可以安全标记。
+    """
+    try:
+        n = 0
+        for m in db.list_meetings(limit=500):
+            if m["status"] in ("recording", "transcribing"):
+                db.set_meeting_status_by_name(m["name"], "interrupted")
+                n += 1
+                db.add_log("warn", "meeting",
+                           f"检测到中断的会议（进程重启），已标记 interrupted: {m['name']}")
+        if n:
+            db.add_log("info", "meeting", f"启动恢复：共标记 {n} 个中断会议")
+    except Exception as e:
+        db.add_log("warn", "meeting", f"会议状态恢复失败: {e}")
+
+
+# ---------------------------------------------------------------- 录音
+
+def start_meeting():
+    with _state_lock:
+        if _state["active"]:
+            return False, "会议录音已在进行中"
+        cfg = settings
+        now = datetime.datetime.now()
+        folder = os.path.join(MEETINGS_DIR, now.strftime("%Y-%m-%d_%H-%M-%S"))
+        os.makedirs(folder, exist_ok=True)
+
+        meta = {
+            "start": now.isoformat(timespec="seconds"),
+            "config": {
+                "sttModel": cfg.get("meetingSttModel", "small"),
+                "sttDevice": cfg.get("device", "auto"),
+                "segmentMinutes": cfg.get("meetingSegmentMinutes", 10),
+                "autoSummarize": cfg.get("meetingAutoSummarize", True),
+                "diarize": cfg.get("meetingDiarize", False),
+            },
+            "segments": [],
+        }
+        with open(os.path.join(folder, "meta.json"), "w", encoding="utf-8") as f:
+            json.dump(meta, f, ensure_ascii=False, indent=2)
+
+        meeting_id = db.create_meeting(
+            os.path.basename(folder), started_at=meta["start"],
+            stt_model=meta["config"]["sttModel"], stt_device=meta["config"]["sttDevice"],
+            diarize=1 if meta["config"]["diarize"] else 0)
+
+        recorder = MeetingRecorder(
+            folder,
+            segment_minutes=int(cfg.get("meetingSegmentMinutes", 10)),
+            device_id=int(cfg.get("inputDeviceId", -1)),
+            level_cb=lambda lv: _state.update(level=lv),
+        )
+        recorder.start()
+
+        _state.update(active=True, folder=folder, recorder=recorder,
+                      started_at=meta["start"], error="")
+        db.add_event("meeting_started", {"meeting": os.path.basename(folder), "id": meeting_id})
+        db.add_log("info", "meeting", f"开始录音: {os.path.basename(folder)}")
+        return True, os.path.basename(folder)
+
+
+def stop_meeting():
+    with _state_lock:
+        if not _state["active"]:
+            return False, "没有进行中的会议"
+        recorder = _state["recorder"]
+        folder = _state["folder"]
+        recorder.stop()
+        _state.update(active=False, level=0.0, recorder=None)
+
+        meta_path = os.path.join(folder, "meta.json")
+        meta = _load_json(meta_path, {})
+        segs = sorted(recorder.segments)
+        meta["end"] = datetime.datetime.now().isoformat(timespec="seconds")
+        meta["segments"] = segs
+        meta["durationSeconds"] = sum(_wav_seconds(os.path.join(folder, s)) for s in segs)
+        with open(meta_path, "w", encoding="utf-8") as f:
+            json.dump(meta, f, ensure_ascii=False, indent=2)
+        _state["folder"] = None
+
+        meeting = db.get_meeting_by_name(os.path.basename(folder))
+        if meeting:
+            db.update_meeting(meeting["id"], ended_at=meta["end"],
+                              duration_seconds=meta["durationSeconds"],
+                              segments=len(segs), status="transcribing")
+
+        # 后台转写（不阻塞）
+        threading.Thread(target=_transcribe_meeting, args=(folder,), daemon=True).start()
+        db.add_event("meeting_stopped", {"meeting": os.path.basename(folder)})
+        db.add_log("info", "meeting", f"停止录音，开始转写: {os.path.basename(folder)}")
+        return True, os.path.basename(folder)
+
+
+# ---------------------------------------------------------------- 转写
+
+def _load_json(path, default):
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return default
+
+
+def _wav_seconds(path):
+    try:
+        import wave
+        with wave.open(path, "rb") as w:
+            return w.getnframes() / float(w.getframerate())
+    except Exception:
+        return 0
+
+
+def _assign_speakers(seg_rows, turns):
+    """说话人分离结果匹配到转写行：按覆盖时长取最长说话人（已实测验证）。"""
+    if not turns:
+        return [(seg, s, e, "", txt) for seg, s, e, txt in seg_rows]
+    turns = sorted(turns, key=lambda x: x[0])
+    out = []
+    for seg_idx, s_start, s_end, text in seg_rows:
+        coverage = {}
+        for start, end, spk in turns:
+            ov = min(s_end, end) - max(s_start, start)
+            if ov > 0:
+                coverage[spk] = coverage.get(spk, 0.0) + ov
+        if coverage:
+            speaker = max(coverage, key=coverage.get)
+        else:
+            mid = (s_start + s_end) / 2.0
+            speaker = min(turns, key=lambda x: min(abs(mid - x[0]), abs(mid - x[1])))[2]
+        out.append((seg_idx, s_start, s_end, speaker, text))
+    return out
+
+
+def _align_sentences(sv_text, wsegs):
+    """SenseVoice 整段文本（带标点）对齐 whisper 碎句时间轴，按标点切句。"""
+    import difflib
+    if not wsegs or not sv_text:
+        return []
+    w_chars, w_times = [], []
+    for st, en, txt in wsegs:
+        t = (txt or "").strip()
+        if not t:
+            continue
+        n = len(t)
+        for i, ch in enumerate(t):
+            w_chars.append(ch)
+            w_times.append(st + (en - st) * (i + 0.5) / n)
+    if not w_chars:
+        return []
+    sv = list(sv_text)
+    sm = difflib.SequenceMatcher(None, sv, w_chars, autojunk=False)
+    tmap = {}
+    for op, i1, i2, j1, j2 in sm.get_opcodes():
+        if op == "equal":
+            for k in range(i2 - i1):
+                tmap[i1 + k] = w_times[j1 + k]
+    sv_times = []
+    last_i, last_t = -1, 0.0
+    for i in range(len(sv)):
+        if i in tmap:
+            last_i, last_t = i, tmap[i]
+            sv_times.append(tmap[i])
+        else:
+            nxt = None
+            for j in range(i + 1, len(sv)):
+                if j in tmap:
+                    nxt = (j, tmap[j])
+                    break
+            if nxt and last_i >= 0 and nxt[0] != last_i:
+                sv_times.append(last_t + (nxt[1] - last_t) * (i - last_i) / (nxt[0] - last_i))
+            else:
+                sv_times.append(last_t)
+    sentences = []
+    buf = []
+    seg_start = 0.0
+    for i, ch in enumerate(sv):
+        if not buf:
+            seg_start = sv_times[i]
+        buf.append(ch)
+        if ch in "。！？…":
+            txt = "".join(buf).strip()
+            if txt:
+                sentences.append((seg_start, sv_times[i], txt))
+            buf = []
+    if buf:
+        txt = "".join(buf).strip()
+        if txt:
+            sentences.append((seg_start, sv_times[-1], txt))
+    return sentences
+
+
+def _boot_meeting_stt(status, detail=""):
+    """同步 boot 页 stt-meeting 组件状态（懒导入避免循环依赖）。"""
+    try:
+        import app.boot as boot
+        boot.report("stt-meeting", status=status, detail=detail)
+    except Exception:
+        pass
+
+
+def _boot_note_meeting_key():
+    try:
+        import app.boot as boot
+        from app.audio import stt
+        eng, model = stt.resolve_engine(settings.get("meetingSttModel", "sensevoice"))
+        boot.note_stt_loaded("stt-meeting", stt.engine_key(eng, model))
+    except Exception:
+        pass
+
+
+def _transcribe_meeting(folder):
+    """后台转写主入口；任何异常写入日志，不静默丢失。"""
+    name = os.path.basename(folder)
+    meeting = db.get_meeting_by_name(name)
+    mid = meeting["id"] if meeting else None
+    _boot_meeting_stt("starting", f"转写中 {name}")
+    try:
+        _transcribe_impl(folder)
+        if mid:
+            _clear_progress(mid)
+        services.report_meeting("idle", f"转写完成 {name}")
+        _boot_note_meeting_key()
+        _boot_meeting_stt("online", f"转写完成 · 引擎已加载")
+        tts_mod.beep_ok()          # 转写完成提示音（叮叮）
+    except Exception as e:
+        import traceback
+        msg = f"[{datetime.datetime.now().isoformat(timespec='seconds')}] " \
+              f"转写异常: {e!r}\n{traceback.format_exc()}"
+        db.add_log("error", "meeting", msg[:1500])
+        if meeting:
+            db.update_meeting(meeting["id"], status="error")
+        if mid:
+            _clear_progress(mid)
+        services.report_meeting("error", f"转写失败 {name}")
+        _boot_meeting_stt("failed", f"转写失败 {name}")
+        tts_mod.play_beep("err")   # 转写失败提示音（咚）
+        print(msg, file=sys.stderr)
+
+
+def _fallback_sv_rows(sv, wmodel, seg_path, seg_idx, seg_min, cfg):
+    """回退路径：whisper 时间戳骨架 + SenseVoice 文本字符级对齐切句（保留句级时间戳）。"""
+    wsegs = []
+    try:
+        out, _info = wmodel.transcribe(seg_path, language=cfg.get("sttLanguage", "zh"),
+                                       vad_filter=True, beam_size=5)
+        wsegs = [(s.start, s.end, s.text.strip()) for s in out]
+    except Exception as e:
+        print("whisper 时间戳骨架失败:", e, file=sys.stderr)
+    sv_text = ""
+    try:
+        res = sv.generate(input=seg_path, cache={}, language="auto", use_itn=True, batch_size_s=60)
+        if res:
+            sv_text = re.sub(r"<\|[^|]*\|>", "", res[0].get("text", "") or "").strip()
+    except Exception as e:
+        print("SenseVoice 转写失败:", e, file=sys.stderr)
+    sentences = _align_sentences(sv_text, wsegs) if (sv_text and wsegs) else []
+    if not sentences and wsegs:
+        sentences = [(st, en, txt) for st, en, txt in wsegs if txt]
+    if not sentences and sv_text:
+        sentences = [(0.0, seg_min * 60.0, sv_text)]
+    return [(seg_idx, st, en, txt) for st, en, txt in sentences]
+
+
+def _transcribe_impl(folder):
+    meta = _load_json(os.path.join(folder, "meta.json"), {})
+    # 重新转写用「当前设置」，meta.json 快照仅作兜底（录音时的配置可能已过期）
+    mcfg = meta.get("config", {}) or {}
+    cfg = {
+        "sttModel": settings.get("meetingSttModel", mcfg.get("sttModel", "small")),
+        "sttDevice": settings.get("device", mcfg.get("sttDevice", "auto")),
+        "sttLanguage": settings.get("sttLanguage", mcfg.get("sttLanguage", "zh")),
+        "segmentMinutes": int(settings.get("meetingSegmentMinutes",
+                                           mcfg.get("segmentMinutes", 10))),
+        "autoSummarize": bool(settings.get("meetingAutoSummarize",
+                                           mcfg.get("autoSummarize", True))),
+        "diarize": bool(settings.get("meetingDiarize", mcfg.get("diarize", False))),
+    }
+    segs = sorted(meta.get("segments", []) or
+                  [f for f in os.listdir(folder) if re.match(r"^\d+\.wav$", f)])
+    if not segs:
+        return
+    meeting_name = os.path.basename(folder)
+    meeting = db.get_meeting_by_name(meeting_name)
+    if not meeting:
+        return
+    meeting_id = meeting["id"]
+    db.clear_meeting_lines(meeting_id)
+    db.update_meeting(meeting_id, status="transcribing")
+
+    # 进度初始化（面板据此显示第 N/M 段 + 阶段）
+    seg_total = len(segs)
+    _set_progress(meeting_id, phase="准备模型", seg_index=0, seg_total=seg_total,
+                  percent=0, detail=f"共 {seg_total} 段")
+
+    db_rows = []
+    speaker_names = {}
+    seg_min = int(cfg.get("segmentMinutes", 10))
+    diarize = bool(cfg.get("diarize", False))
+
+    registry = None
+    if diarize:
+        try:
+            from app.audio.diarize import diarize_wav_full, SpeakerRegistry
+            registry = SpeakerRegistry()
+        except Exception as e:
+            print("说话人分离模块不可用，跳过:", e, file=sys.stderr)
+            diarize = False
+
+    # 文本优先引擎（SenseVoice / Qwen3-ASR）：Qwen3-ASR 用 ForcedAligner 原生句子+时间戳；
+    # SenseVoice 用 whisper 时间戳骨架 + 字符级对齐切句（保留句级时间戳）
+    use_sv = cfg.get("sttModel") in ("sensevoice", "qwen3asr")
+    sv_kind = cfg.get("sttModel")
+    wmodel = None
+    sv = None
+    if use_sv:
+        wmodel = stt_mod._get_whisper("small", cfg.get("sttDevice", "auto"))
+        if sv_kind == "qwen3asr":
+            sv = stt_mod._get_qwen3asr(cfg.get("sttDevice", "auto"),
+                                       forced_aligner="Qwen/Qwen3-ForcedAligner-0.6B")
+        else:
+            sv = stt_mod._get_sensevoice(cfg.get("sttDevice", "auto"))
+    else:
+        wmodel = stt_mod._get_whisper(cfg.get("sttModel", "small"),
+                                      cfg.get("sttDevice", "auto"))
+
+    for i, seg in enumerate(segs, start=1):
+        seg_idx = int(seg.split(".")[0])
+        seg_path = os.path.join(folder, seg)
+        percent = round(i / seg_total * 100) if seg_total else 0
+        _set_progress(meeting_id, phase="转写中", seg_index=i, seg_total=seg_total,
+                      percent=percent, detail=f"第 {i}/{seg_total} 段 · {cfg.get('sttModel', '')}")
+        seg_rows = []
+        if use_sv:
+            # Qwen3-ASR：优先用 ForcedAligner 原生时间戳（自然句子），失败回退 whisper 骨架对齐
+            if sv_kind == "qwen3asr":
+                lang_hint = stt_mod._LANG_MAP.get(str(cfg.get("sttLanguage", "zh")).lower(), None)
+                _full_text, sentences = stt_mod._qwen3asr_sentences(sv, seg_path, lang_hint)
+                if sentences:
+                    seg_rows = [(seg_idx, st, en, txt) for st, en, txt in sentences]
+                else:
+                    seg_rows = _fallback_sv_rows(sv, wmodel, seg_path, seg_idx, seg_min, cfg)
+            else:
+                seg_rows = _fallback_sv_rows(sv, wmodel, seg_path, seg_idx, seg_min, cfg)
+        else:
+            try:
+                out, _info = wmodel.transcribe(seg_path, language=cfg.get("sttLanguage", "zh"),
+                                               vad_filter=True, beam_size=5)
+                seg_rows = [(seg_idx, s.start, s.end, s.text.strip()) for s in out]
+            except Exception as e:
+                print("转写失败:", e, file=sys.stderr)
+
+        if diarize:
+            _set_progress(meeting_id, phase="说话人分离", seg_index=i, seg_total=seg_total,
+                          percent=percent, detail=f"第 {i}/{seg_total} 段 · 分离说话人")
+            try:
+                from app.audio.diarize import diarize_wav_full
+                turns_raw, embs, labels = diarize_wav_full(seg_path)
+                label_map = registry.map(embs, labels)
+                key_map = {}
+                for plabel, disp in label_map.items():
+                    num = re.sub(r"\D", "", disp)
+                    key = "S" + num
+                    key_map[plabel] = key
+                    speaker_names[key] = disp
+                turns = [(s, e, key_map[spk]) for s, e, spk in turns_raw]
+                seg_rows = _assign_speakers(seg_rows, turns)
+            except Exception as e:
+                print("说话人分离失败:", e, file=sys.stderr)
+        else:
+            seg_rows = [(seg, s, e, "", txt) for seg, s, e, txt in seg_rows]
+
+        db_rows.extend(seg_rows)
+        meta.setdefault("transcribed", []).append(seg)
+        with open(os.path.join(folder, "meta.json"), "w", encoding="utf-8") as f:
+            json.dump(meta, f, ensure_ascii=False, indent=2)
+
+    _set_progress(meeting_id, phase="整理结果", seg_index=seg_total, seg_total=seg_total,
+                  percent=100, detail="写入数据库与导出转写文件")
+    if speaker_names:
+        db.replace_speakers(meeting_id, speaker_names)
+    db.add_lines(meeting_id, db_rows)
+    db.cleanup_empty_speakers(meeting_id)
+    db.update_meeting(meeting_id, status="transcribed",
+                      duration_seconds=meta.get("durationSeconds", 0),
+                      segments=len(segs))
+    export_transcript(meeting_id, folder)
+
+    if cfg.get("autoSummarize", True) and db_rows:
+        _set_progress(meeting_id, phase="生成纪要", seg_index=seg_total, seg_total=seg_total,
+                      percent=100, detail="已请求生成纪要+议题分段")
+        request_summary(meeting_id, folder)
+        request_topic_segments(meeting_id, folder)
+
+
+def export_transcript(meeting_id, folder=None):
+    """从 DB 导出 transcript.md（按段分组，带段标题；行时间戳为会议绝对时间）。"""
+    if folder is None:
+        meeting = db.get_meeting(meeting_id)
+        if not meeting:
+            return
+        folder = os.path.join(MEETINGS_DIR, meeting["name"])
+    meeting = db.get_meeting(meeting_id) or {}
+    speakers = {s["label"]: s["name"] for s in db.get_speakers(meeting_id)}
+    lines = db.get_lines(meeting_id)
+    start_ts = meeting.get("started_at", "")
+    seg_dur = _seg_duration_map(folder)
+    out = [f"# 会议转写 {start_ts}", ""]
+    if not lines:
+        out.append("（未检测到有效语音）")
+    else:
+        # 按段分组；段起始 = 之前所有段的时长累计（绝对时间）
+        by_seg = {}
+        for ln in lines:
+            by_seg.setdefault(ln["seg_index"], []).append(ln)
+        abs_offset = 0.0
+        for seg_idx in sorted(by_seg):
+            seg_lines = by_seg[seg_idx]
+            dur = seg_dur.get(seg_idx, seg_lines[-1]["end"] if seg_lines else 0)
+            seg_abs_start = abs_offset
+            seg_abs_end = abs_offset + dur
+            out.append(f"## 第 {seg_idx} 段 [{_fmt_ts(seg_abs_start)} - {_fmt_ts(seg_abs_end)}]")
+            out.append("")
+            for ln in seg_lines:
+                spk = speakers.get(ln["speaker_label"], "") or ""
+                t_abs = seg_abs_start + float(ln["start"] or 0)
+                prefix = f"[{spk}] " if spk else ""
+                out.append(f"{prefix}[{_fmt_ts_full(t_abs)}] {ln['text']}")
+            out.append("")
+            abs_offset = seg_abs_end
+    with open(os.path.join(folder, "transcript.md"), "w", encoding="utf-8") as f:
+        f.write("\n".join(out))
+
+
+def _fmt_ts(sec):
+    sec = int(sec or 0)
+    return f"{sec // 60:02d}:{sec % 60:02d}"
+
+
+def _fmt_ts_full(sec):
+    sec = int(sec or 0)
+    return f"{sec // 3600:02d}:{sec % 3600 // 60:02d}:{sec % 60:02d}"
+
+
+def _seg_duration_map(folder):
+    """段号 -> 该段音频总时长（秒）。"""
+    out = {}
+    if not os.path.isdir(folder):
+        return out
+    for f in os.listdir(folder):
+        m = re.match(r"^(\d+)\.wav$", f)
+        if m:
+            out[int(m.group(1))] = _wav_seconds(os.path.join(folder, f))
+    return out
+
+
+def build_segments(meeting_id):
+    """按段聚合转写行，供前端"自然段"视图渲染。
+
+    返回 [{index, duration, start, end, speakers:[{label,name,count}], lines:[...]}]
+    """
+    meeting = db.get_meeting(meeting_id)
+    if not meeting:
+        return []
+    folder = os.path.join(MEETINGS_DIR, meeting["name"])
+    seg_dur = _seg_duration_map(folder)
+    lines = db.get_lines(meeting_id)
+    by_seg = {}
+    for ln in lines:
+        by_seg.setdefault(ln["seg_index"], []).append(ln)
+    out = []
+    for seg_idx in sorted(by_seg):
+        seg_lines = by_seg[seg_idx]
+        spk_count = {}
+        for ln in seg_lines:
+            lbl = ln["speaker_label"] or "?"
+            spk_count[lbl] = spk_count.get(lbl, 0) + 1
+        speakers = [{"label": k, "name": k, "count": v} for k, v in
+                    sorted(spk_count.items(), key=lambda x: -x[1])]
+        duration = seg_dur.get(seg_idx, 0)
+        start = seg_lines[0]["start"] if seg_lines else 0
+        end = seg_lines[-1]["end"] if seg_lines else duration
+        out.append({
+            "index": seg_idx,
+            "duration": round(duration, 1),
+            "start": round(start, 1),
+            "end": round(end, 1),
+            "speakers": speakers,
+            "lines": seg_lines,
+        })
+    return out
+
+
+# ---------------------------------------------------------------- 纪要
+
+# 会议纪要工作区会话缓存：meeting_id -> sessionId（一次会议共用一个新会话，
+# 避免上下文在固定纪要会话里无限累积；会议删除时清理）。
+_MEETING_SESSIONS = {}
+_MEETING_SESSIONS_LOCK = threading.Lock()
+# 同一会议的纪要/分段/语义分段请求需串行执行：并发发往同一会话时，
+# wait_for_reply 会都抢到第一个完成的回复（整场纪要），导致分段输出被覆盖。
+_MEETING_LOCKS = {}
+_MEETING_LOCKS_LOCK = threading.Lock()
+
+
+def _summary_session(client, meeting_id):
+    """解析纪要会话：
+    - 配置了 meetingWorkspace → 每次会议（按 meeting_id）在该工作区新建会话并复用；
+    - 未配置 → 沿用固定「纪要会话」。
+    """
+    ws = (settings.get("meetingWorkspace", "") or "").strip()
+    if not ws:
+        return client.ensure_session("summary", name="纪要会话")
+    with _MEETING_SESSIONS_LOCK:
+        sid = _MEETING_SESSIONS.get(meeting_id)
+        if sid:
+            return sid
+        sid = client.create_session(cwd=ws)
+        if sid:
+            _MEETING_SESSIONS[meeting_id] = sid
+            db.add_log("info", "meeting",
+                       f"会议纪要工作区新建会话 {sid}（{os.path.basename(ws)}）")
+        return sid
+
+
+def _drop_summary_session(meeting_id):
+    with _MEETING_SESSIONS_LOCK:
+        _MEETING_SESSIONS.pop(meeting_id, None)
+
+
+
+
+def _quote_mm_text(raw):
+    """mermaid 形状/标签文本：含半角括号等特殊字符但未用引号包裹时补双引号。
+    已包裹（"..."）或无需包裹的原文原样返回。"""
+    t = raw.strip()
+    if not t:
+        return raw
+    if len(t) >= 2 and t[0] == '"' and t[-1] == '"' and t.count('"') == 2:
+        return raw  # 已用引号包裹
+    if any(ch in t for ch in "()[]{}|"):
+        return '"' + t.replace('"', "#quot;") + '"'
+    return raw
+
+
+def _scan_mm_shape(line, j, expect_close):
+    """从 j 起扫描，直到栈空时遇到 expect_close，返回其索引；失败返回 None。
+    括号只按嵌套配对，引号字符串整体跳过（视为文本一部分）。"""
+    stack = []
+    k = j
+    n = len(line)
+    while k < n:
+        c = line[k]
+        if c == '"':
+            k2 = line.find('"', k + 1)
+            if k2 == -1:
+                return None
+            k = k2 + 1
+            continue
+        if c in "([{":
+            stack.append({"(": ")", "[": "]", "{": "}"}[c])
+        elif c in ")]}":
+            if stack and stack[-1] == c:
+                stack.pop()
+            elif stack:
+                return None  # 括号不匹配，放弃（保守不改该行）
+            elif c == expect_close:
+                return k
+            else:
+                return None
+        elif c == expect_close and not stack:
+            return k  # 非括号闭符（如边标签 |...| 的 |）
+        k += 1
+    return None
+
+
+def _fix_flowchart_line(line):
+    """修复一行 flowchart/graph 代码：给节点形状 / 边标签文本中含括号、
+    竖线等特殊字符却未加引号的片段补双引号（CY[初验(出验)证书] → CY["初验(出验)证书"]）。
+    解析不确定时整行保持原样，绝不做破坏性修改。"""
+    out = []
+    i = 0
+    n = len(line)
+    while i < n:
+        c = line[i]
+        if c == '"':
+            j = line.find('"', i + 1)
+            if j == -1:
+                out.append(line[i:])
+                break
+            out.append(line[i:j + 1])
+            i = j + 1
+            continue
+        if c == "|":  # 边标签 |...|
+            j = _scan_mm_shape(line, i + 1, "|")
+            if j is None:
+                out.append(line[i:])
+                break
+            out.append("|" + _quote_mm_text(line[i + 1:j]) + "|")
+            i = j + 1
+            continue
+        if c in "[({":
+            nxt = line[i + 1] if i + 1 < n else ""
+            if c == "[" and nxt == "(":
+                close, tstart = ")", i + 2
+            elif c == "[" and nxt == "[":
+                close, tstart = "]", i + 2
+            elif c == "(" and nxt == "[":
+                close, tstart = "]", i + 2
+            elif c == "(" and nxt == "(":
+                close, tstart = ")", i + 2
+            elif c == "{" and nxt == "{":
+                close, tstart = "}", i + 2
+            else:
+                close, tstart = {"[": "]", "(": ")", "{": "}"}[c], i + 1
+            k = _scan_mm_shape(line, tstart, close)
+            if k is None:
+                out.append(line[i:])
+                break
+            raw = line[tstart:k].strip()
+            quoted = _quote_mm_text(raw)
+            out.append(line[i:tstart] + quoted + line[k])
+            i = k + 1
+            continue
+        out.append(c)
+        i += 1
+    return "".join(out)
+
+
+def _fix_timeline_line(line):
+    """修复一行 timeline 代码。
+
+    2026-09-12 实测（用面板自带 mermaid 逐个渲染对照，见提交说明）：
+      1) 标题必须是 `title: 文本`（冒号必填）。LLM 常写成 `title 文本`，缺冒号时
+         解析器直接报 Expecting 'title',… got 'INVALID'。
+      2) **周期文本里不能含冒号**：timeline 用 `:` 分隔"周期 : 事件"，所以
+         `00:00:12 : 发起试音` 会被切错，报 Expecting 'period','event' got 'INVALID'。
+         实测 `00.00.12 : …`（点号）与 `00-00-12 : …`（短横）都正常渲染，
+         而 `{00:00:12}` / `"00:00:12"` 这类修饰写法不被支持。
+    因此这里：补 title 的冒号；把行内"时间戳"（纯数字+冒号的序列，如 00:00:12）
+    的冒号换成点号，其余部分（分隔符与事件文本里的冒号）保持不动。
+    """
+    m = re.match(r'^(\s*title)(\s+)(?!:)(.+)$', line)
+    if m:
+        line = f"{m.group(1)}: {m.group(3).strip()}"
+    # 只替换"数字:数字(:数字…)"这种时间戳形态，避免误伤 "12:30 讨论" 之类的事件文本
+    return re.sub(r'(?<![\d:])(\d{1,3}(?::\d{2}){1,3})(?![\d:])',
+                  lambda mm: mm.group(1).replace(':', '.'), line)
+
+
+def _fix_timeline_block(block_lines):
+    """对整个 timeline 代码块做修复（逐行调用 _fix_timeline_line）。"""
+    return [_fix_timeline_line(ln) for ln in block_lines]
+
+
+def _sanitize_mermaid(md_text):
+    """修复 LLM 生成的 markdown 中 mermaid 图表的渲染错误（防 Obsidian/网页报错）。
+    处理 ```mermaid 代码块：
+      - graph/flowchart：给含括号等符号的节点/边标签补引号（_fix_flowchart_line）
+      - timeline：给缺冒号的 `title` 行补冒号（_fix_timeline_line）
+    非代码区与其它图型的代码块原样保留。"""
+    out_lines = []
+    in_code = False
+    kind_wait = False
+    diagram_kind = ""
+    for raw in md_text.split("\n"):
+        line = raw
+        s = line.strip()
+        if s.startswith("```"):
+            if not in_code:
+                rest = s[3:].strip()
+                if rest.startswith("mermaid"):
+                    in_code = True
+                    kind_wait = True
+                    diagram_kind = ""
+            else:
+                in_code = False
+                diagram_kind = ""
+                kind_wait = False
+            out_lines.append(line)
+            continue
+        if in_code:
+            if kind_wait:
+                kind_wait = False
+                diagram_kind = s
+            if re.match(r"^(graph|flowchart)\b", diagram_kind):
+                out_lines.append(_fix_flowchart_line(line))
+            elif re.match(r"^timeline\b", diagram_kind):
+                out_lines.append(_fix_timeline_line(line))
+            else:
+                out_lines.append(line)
+        else:
+            out_lines.append(line)
+    return "\n".join(out_lines)
+
+
+def _meeting_parts(folder):
+    """读取会议各记录来源，返回 (summary_src, topics_src, transcript_src)。
+    summary_src：summary.md（markdown 纪要）；topics_src：topics.md（元数据 JSON）；
+    transcript_src：transcript.md。缺失返回空串。"""
+    def _read(name):
+        p = os.path.join(folder, name)
+        try:
+            return open(p, encoding="utf-8").read().strip()
+        except OSError:
+            return ""
+    return _read("summary.md"), _read("topics.md"), _read("transcript.md")
+
+
+def _meeting_full_text(summary_src, topics_src, transcript_src):
+    """按「会议摘要（元数据） → 会议纪要（markdown） → 议题分段 → 转写详情」
+    拼装完整纪要全文（写入归档 _会议纪要.md）。"""
+    parts = []
+    _t, _intro, abstract, segs = _parse_topics_meta(topics_src)
+    if abstract:
+        parts.append("# 会议摘要\n\n" + abstract)
+    if summary_src:
+        parts.append("# 会议纪要\n\n" + summary_src)
+    if segs:
+        parts.append("# 议题分段\n\n" + _topics_to_md(segs))
+    if transcript_src:
+        parts.append("# 转写详情\n\n" + transcript_src)
+    return "\n\n---\n\n".join(parts)
+
+
+def _clean_md(s):
+    """去掉行内 markdown 强调/链接语法，保留正文文字。"""
+    s = re.sub(r"!?\[\[([^\]|]*?)(?:\|[^\]]*?)?\]\]", r"\1", s)
+    s = re.sub(r"!?\[([^\]]*)\]\([^)]*\)", r"\1", s)
+    s = re.sub(r"\*\*([^*]+)\*\*", r"\1", s)
+    s = re.sub(r"\*([^*]+)\*", r"\1", s)
+    s = re.sub(r"`([^`]*)`", r"\1", s)
+    return s
+
+
+def _clip_text(s, n):
+    """截断到 n 字以内，优先在中文标点处断句，过长加省略号。"""
+    s = (s or "").strip()
+    if len(s) <= n:
+        return s
+    cut = s[:n - 1]
+    for p in "。；；！？，、":
+        idx = cut.rfind(p)
+        if idx > (n - 1) * 0.5:
+            return cut[:idx + 1]
+    return cut + "…"
+
+
+def _meeting_short_summary(content, max_len=140):
+    """从纪要 markdown 提取 1~3 句简短会议摘要（供工作日志条目兜底使用）。
+    优先级：会议目标 → 议题小节 → 主标题导语 → 首个实质行。返回单行纯文本。"""
+    if not content:
+        return ""
+    text = _clean_md(re.sub(r"```.*?```", "", content, flags=re.S))  # 去代码块并清行内 markdown
+    # 1) 会议目标 / 会议要解决的问题（**会议目标**：… 或 会议目标：…，已去 **）
+    m = re.search(r"(?:会议目标|会议要解决的问题)\s*[：:]\s*([^\n]+)", text)
+    if m:
+        s = _clean_md(m.group(1)).strip()
+        if len(s) >= 6:
+            return _clip_text(s, max_len)
+    # 2) 议题小节（## 一、议题 之类）下的要点前几条
+    m2 = re.search(r"#{1,6}\s*[^\n]*议题[^\n]*\n(.*?)(?=\n#{1,6}|\Z)", text, re.S)
+    if m2:
+        items = []
+        for ln in m2.group(1).split("\n"):
+            s = _clean_md(ln).strip()
+            if not s or re.match(r"^```", s):
+                continue
+            if s.startswith("#"):
+                break
+            s = re.sub(r"^[-*\d、\.]+|^[-*]\s*", "", s).strip()
+            if len(s) >= 4:
+                items.append(s)
+            if len(items) >= 3:
+                break
+        if items:
+            return _clip_text("；".join(items), max_len)
+    # 3) 主标题（# 行）之后的导语正文：跳过时间/参会方元数据，取实质内容行
+    body = []
+    started = False
+    for ln in text.split("\n"):
+        if re.match(r"^#\s", ln):
+            started = True
+            continue
+        if not started:
+            continue
+        if ln.strip().startswith("#"):
+            break
+        s = _clean_md(ln).strip()
+        if not s:
+            continue
+        if re.match(r"^(会议时间|会议时长|参会方|参会人|参会|时间|地点|主持)", s):
+            continue
+        body.append(s)
+        if len(body) >= 2:
+            break
+    if body:
+        return _clip_text("；".join(body), max_len)
+    # 4) 兜底：首个实质行
+    for ln in text.split("\n"):
+        s = _clean_md(ln).strip()
+        if s and not s.startswith("#"):
+            return _clip_text(s, max_len)
+    return ""
+
+
+# ---------------------------------------------------------------- 结构化输出解析
+# 2026-09-11：两次 DSH 调用分工。
+# 调用1（纪要）→ summary.md：纯 markdown 纪要（可含 Mermaid 图表），前端直接渲染。
+# 调用2（元数据）→ topics.md：单个 JSON 对象，供列表/工作日志/主题分段/归档使用：
+#   {"标题":"…","简介":"…","摘要":"…","分段":[{"标题","开始","结束","摘要"}, …]}
+# DSH 可能在 JSON 前后夹带分析文本，_try_load_json 负责从中提取合法 JSON 块。
+
+_JSON_DECODER = json.JSONDecoder()
+
+
+def _try_load_json(text):
+    """从回复文本中提取 JSON。DSH 可能在 JSON 前后附带分析/注释文本，
+    直接 json.loads 整段会失败；这里用 raw_decode 扫描、提取每个合法 JSON 块，
+    优先返回最后一个 dict/list（DSH 常先给草稿再给 finalize 版）。失败返回 None。"""
+    if not text:
+        return None
+    s = text.strip()
+    s = re.sub(r"^```(?:json)?\s*", "", s)
+    s = re.sub(r"\s*```$", "", s)
+    if not s:
+        return None
+    try:
+        return json.loads(s)  # 纯 JSON 快速路径
+    except Exception:
+        pass
+    results = []
+    i = 0
+    n = len(s)
+    while i < n:
+        c = s[i]
+        if c in "{[":
+            try:
+                val, end = _JSON_DECODER.raw_decode(s, i)
+                results.append(val)
+                i = end
+                continue
+            except (json.JSONDecodeError, ValueError):
+                pass
+        i += 1
+    if not results:
+        return None
+    # 优先挑含目标字段的 dict；否则最后一个 dict/list
+    for r in reversed(results):
+        if isinstance(r, dict) and any(k in r for k in ("标题", "分段", "会议名称", "摘要")):
+            return r
+    for r in reversed(results):
+        if isinstance(r, (dict, list)):
+            return r
+    return results[-1]
+
+
+def _parse_topics_meta(text):
+    """解析 topics.md 的元数据 JSON。返回 (标题, 简介, 摘要, 分段列表) 或 (None,None,None,None)。
+    分段列表元素为 {标题,开始,结束,摘要}；无有效 JSON 时各字段为 None/[]。"""
+    obj = _try_load_json(text)
+    if not isinstance(obj, dict):
+        return None, None, None, None
+    title = (obj.get("标题") or "").strip()
+    intro = (obj.get("简介") or "").strip()
+    abstract = (obj.get("摘要") or "").strip()
+    segs = []
+    raw = obj.get("分段")
+    if isinstance(raw, list):
+        for it in raw:
+            if not isinstance(it, dict):
+                continue
+            segs.append({
+                "标题": (it.get("标题") or "").strip(),
+                "开始": str(it.get("开始") or "").strip(),
+                "结束": str(it.get("结束") or "").strip(),
+                "摘要": (it.get("摘要") or "").strip(),
+            })
+    return title, intro, abstract, segs or None
+
+
+def _parse_topics_fields(text):
+    """从 topics.md 提取议题分段列表（元数据 JSON 的“分段”字段）。
+    无有效分段返回 None。兼容旧格式：若顶层就是数组也直接接受。"""
+    title, intro, abstract, segs = _parse_topics_meta(text)
+    if segs:
+        return segs
+    obj = _try_load_json(text)
+    if isinstance(obj, list):  # 旧格式：顶层即数组
+        out = []
+        for it in obj:
+            if not isinstance(it, dict):
+                continue
+            out.append({
+                "标题": (it.get("标题") or "").strip(),
+                "开始": str(it.get("开始") or "").strip(),
+                "结束": str(it.get("结束") or "").strip(),
+                "摘要": (it.get("摘要") or "").strip(),
+            })
+        return out or None
+    return None
+
+
+def _topics_to_md(topics):
+    """把议题分段数组转成 markdown（供归档“议题分段”节与离线导出）。"""
+    if not topics:
+        return ""
+    lines = []
+    for i, t in enumerate(topics, 1):
+        rng = f" [{t['开始']} - {t['结束']}]" if (t['开始'] or t['结束']) else ""
+        lines.append(f"## {i}. {t['标题']}{rng}\n{t['摘要']}".rstrip())
+        lines.append("")
+    return "\n".join(lines).strip()
+
+
+def _meeting_abstract(content):
+    """会议摘要（工作日志/展示用）：从纪要 markdown 启发式提取（<200字）。
+    结构化「摘要」字段由 topics 元数据提供，工作日志侧优先用 _meeting_summary_for。"""
+    return _meeting_short_summary(content, 200)
+
+
+def _meeting_summary_for(folder, fallback_content=""):
+    """工作日志摘要：优先取 topics.md 元数据里的结构化「摘要」，否则回退启发式提取。"""
+    try:
+        _t, _intro, abstract, _segs = _parse_topics_meta(
+            open(os.path.join(folder, "topics.md"), encoding="utf-8").read())
+        if abstract:
+            return _clip_text(abstract, 200)
+    except OSError:
+        pass
+    return _meeting_short_summary(fallback_content)
+
+
+def _local_short_title(content, max_len=24):
+    """本地兜底：把整场纪要压缩成一行的开会主题短名（DSH 未给标记时用）。"""
+    s = _meeting_short_summary(content, max_len)
+    if not s:
+        return ""
+    s = re.sub(r"[。；，、：\s]+$", "", s.strip())
+    if len(s) <= max_len:
+        return s
+    return s[:max_len].rstrip("。；，、： ") + "…"
+
+
+def _meeting_title(meeting):
+    """会议展示/日志标题：优先自动生成的简短名称，否则回退时间戳文件夹名。"""
+    if not meeting:
+        return ""
+    t = (meeting.get("title") or "").strip()
+    return t or meeting["name"]
+
+
+def _meeting_date(meeting):
+    """会议发生日期（YYYY-MM-DD）：优先取 started_at，解析失败回退今天。
+    工作日志/例会归档都应落在会议当天，而不是用户下达归档命令的日期。"""
+    raw = (meeting or {}).get("started_at") or ""
+    m = re.match(r"^(\d{4}-\d{2}-\d{2})", raw.replace("T", " ").strip())
+    if m:
+        try:
+            datetime.datetime.strptime(m.group(1), "%Y-%m-%d")
+            return m.group(1)
+        except ValueError:
+            pass
+    return datetime.date.today().strftime("%Y-%m-%d")
+
+
+def _meeting_hour(meeting):
+    """会议开始时刻（0-23），用于判定日志写入「上午/下午」节；取不到用当前时刻。"""
+    raw = (meeting or {}).get("started_at") or ""
+    m = re.search(r"[T ](\d{1,2}):\d{2}", raw.strip())
+    if m:
+        try:
+            return int(m.group(1))
+        except ValueError:
+            pass
+    return datetime.datetime.now().hour
+
+
+
+def _refresh_archived_note(meeting_id):
+    """纪要/元数据重新生成后，刷新本地归档 md（meeting_note.md）。
+
+    解决"先生成的是占位版已归档、稍后真正成稿后本地 md 还是旧的"问题。
+    只重写本地这一份材料文件；笔记库里已归档的内容是否更新，由用户的归档技能
+    在下次归档时幂等覆盖决定——ECHO 不直接改笔记库（2026-09-12 起）。
+    """
+    try:
+        meeting = db.get_meeting(meeting_id)
+        if not meeting:
+            return
+        folder = os.path.join(MEETINGS_DIR, meeting["name"])
+        _s, _seg, _tr = _meeting_parts(folder)
+        full_text = _meeting_full_text(_s, _seg, _tr)
+        # 只有源里确实有实质纪要才重写，避免用更空的内容覆盖更全的
+        if _looks_placeholder(_s) or not (_s or _seg or _tr):
+            return
+        path = worklog.export_note(meeting, folder, full_text)
+        if path:
+            db.add_log("info", "meeting",
+                       f"会议 {_meeting_title(meeting)} 本地归档材料已刷新")
+    except Exception as e:
+        db.add_log("warn", "meeting", f"刷新本地归档材料失败: {e}")
+
+
+def push_meeting_to_worklog(meeting_id, archive_hint=""):
+    """把会议纪要归档到用户的笔记库——**委派给用户自己的归档技能**。
+
+    ECHO 只做三件事：备齐材料（落一份自包含 md）、定位笔记库、把任务送进 DSH。
+    写到哪个目录、日志什么格式、有哪些专项与例会，全部由技能决定。
+    返回值 (ok, msg)，msg 是技能回的一句话（原样转给面板）。
+
+    archive_hint 即面板「归档要求」自由文本，空则由技能按自身默认规则判断。
+    """
+    ok, why = worklog.ready()
+    if not ok:
+        return False, why
+    meeting = db.get_meeting(meeting_id)
+    if not meeting:
+        return False, "会议不存在"
+    folder = os.path.join(MEETINGS_DIR, meeting["name"])
+    content = open(os.path.join(folder, "summary.md"), encoding="utf-8").read() \
+        if os.path.isfile(os.path.join(folder, "summary.md")) else ""
+    _summary, _segments, _transcript = _meeting_parts(folder)
+    full_text = _meeting_full_text(_summary, _segments, _transcript)
+    if not (full_text or content):
+        return False, "暂无纪要，请先生成纪要"
+    try:
+        note_path = worklog.export_note(meeting, folder, full_text, content)
+    except OSError as e:
+        return False, f"导出纪要文件失败: {e}"
+    if not note_path:
+        return False, "暂无纪要内容可归档"
+    db.add_log("info", "meeting",
+               f"会议 {_meeting_title(meeting)} 归档委派：{note_path}")
+    return worklog.delegate_archive(
+        meeting, note_path, archive_hint=archive_hint,
+        date_str=_meeting_date(meeting), hour=_meeting_hour(meeting))
+
+def request_summary(meeting_id, folder=None):
+    """请 DSH 生成整场会议纪要（纯 markdown，可含 Mermaid 图表），
+    后台线程等待回复并写入 summary.md。标题/简介/摘要/分段由第二次调用
+    （request_topic_segments）以 JSON 提供，供列表/日志/前端使用。"""
+    if folder is None:
+        meeting = db.get_meeting(meeting_id)
+        folder = os.path.join(MEETINGS_DIR, meeting["name"])
+    meeting = db.get_meeting(meeting_id)
+    transcript = os.path.join(folder, "transcript.md").replace("\\", "/")
+    text = (f"任务：基于会议转写文件生成会议纪要（markdown 格式）。\n"
+            f"步骤：1) 用 read 工具读取文件 \"{transcript}\"（已按片段组织，"
+            f"每片有 \"## 第 N 段 [起-止]\" 标题，行内带[绝对时间戳]）。\n"
+            f"2) 生成完整纪要：**会议背景/议题 → 各议题关键讨论与结论 → "
+            f"待办事项及责任人**。\n"
+            f"**尽量用 Mermaid 图表表达结构与流程**：如 flowchart 表达分工/流程、"
+            f"timeline 表达时间线/进度、sequenceDiagram 表达协作时序；Mermaid 代码用 "
+            f"```mermaid 代码块标注。\n"
+            f"**Mermaid 规范**：flowchart/graph 中节点文本与连线标签若含括号等符号，"
+            f"必须用双引号包裹文本（如 CY[\"初验(出验)证书\"]、|\"中验(待签)\"|），"
+            f"否则图表无法渲染；文本内不要出现未闭合引号。\n"
+            f"**timeline 专项规范**（2026-09-12 实测：这两点写错整张图直接报错）："
+            f"1) 标题必须写成 `title: 文本`（冒号不可省）；"
+            f"2) **周期文本里不能含冒号**——timeline 用 `:` 分隔「周期 : 事件」，"
+            f"所以时间戳要写成点号形式 `00.00.12 : 发起试音`（或 `00-00-12`），"
+            f"不要写 `00:00:12 : 发起试音`。\n"
+            f"**输出约束：你只能在最终回复中输出纪要全文（markdown），"
+            f"这是唯一的交付方式。严禁调用 write 或任何写文件工具。**")
+    _spawn_summary_waiter(meeting_id, folder, "summary.md", text, "纪要")
+    return True
+
+
+def request_topic_segments(meeting_id, folder=None):
+    """请 DSH 输出结构化会议元数据 JSON（第二次调用，替代原分段+语义分段两次调用）：
+    标题、简介、摘要、议题分段，供会议列表/工作日志/前端主题分段/归档使用。
+
+    DSH 在回复中只输出一个 JSON 对象，后台线程等待回复并写入 topics.md：
+      {
+        "标题": "…(<20字)",
+        "简介": "…(一句话)",
+        "摘要": "…(<200字)",
+        "分段": [
+          {"标题": "…", "开始": "mm:ss", "结束": "mm:ss", "摘要": "…"},
+          ...
+        ]
+      }
+    """
+    if folder is None:
+        meeting = db.get_meeting(meeting_id)
+        folder = os.path.join(MEETINGS_DIR, meeting["name"])
+    meeting = db.get_meeting(meeting_id)
+    transcript = os.path.join(folder, "transcript.md").replace("\\", "/")
+    text = (f"任务：通读会议转写全文，输出本次会议的结构化元数据 JSON"
+            f"（供会议列表/工作日志/主题分段展示使用）。\n"
+            f"1) 用 read 工具读取转写文件 \"{transcript}\"（每行带[绝对时间戳]，"
+            f"已按音频片段分节，但不代表议题边界）。\n"
+            f"2) 输出一个 JSON 对象，含 4 个字段：\n"
+            f"   - 标题：一句话（不超过 20 个汉字）概括本次会议主题，"
+            f"不带标点结尾、不加引号（如：多模态能力共享中心方案评审）。\n"
+            f"   - 简介：一句话（40 字内）介绍会议性质与目的。\n"
+            f"   - 摘要：整个会议的内容摘要，不超过 200 个汉字。\n"
+            f"   - 分段：按讨论主题/阶段划分 **3~10 个议题段**，每段为一个对象，含："
+            f"标题、起止绝对时间（取该段最早和最晚的时间戳，格式 mm:ss 或 h:mm:ss）、"
+            f"以及 2~3 句摘要（该议题讨论的核心内容与结论）。\n"
+            f"**输出约束：你只能在最终回复中输出一个**合法的 JSON 对象**，形如：\n"
+            f"{{\"标题\":\"会议主题\",\"简介\":\"…\",\"摘要\":\"…\","
+            f"\"分段\":[{{\"标题\":\"议题一\",\"开始\":\"00:00\",\"结束\":\"05:12\","
+            f"\"摘要\":\"…\"}},{{\"标题\":\"议题二\",\"开始\":\"05:12\",\"结束\":\"09:40\","
+            f"\"摘要\":\"…\"}}]}}\n"
+            f"禁止在 JSON 外输出任何说明文字、禁止调用 write 或任何写文件工具。**")
+    _spawn_summary_waiter(meeting_id, folder, "topics.md", text, "议题分段")
+    return True
+
+
+def _looks_placeholder(text):
+    """判断 DSH 回复是否为「占位/意图」而非真实纪要正文。
+
+    若 DSH 只回了一句诸如“I'll read the transcript file first.”、
+    “正在读取转写文件…”这类意图/进度话，却没有任何实质章节/要点，
+    把它当成纪要写盘会造成「真纪要被占位符顶掉、之后展示不出来」。
+    """
+    t = (text or "").strip()
+    if len(t) >= 80:
+        return False  # 长度够，视为有实质内容，不再误判
+    lines = [ln.strip() for ln in t.splitlines() if ln.strip()]
+    plain = [ln for ln in lines if not ln.lstrip().startswith(("#", "```"))]
+    has_body = sum(1 for ln in plain if len(_clean_md(ln)) >= 6)
+    if has_body >= 2:
+        return False  # 有两行以上实质话，视为真内容
+    # 仅剩少量文本 → 命中“意图/进度”句则判为占位
+    pats = re.compile(
+        r"^(I(?:'|\u2019)?ll|i will|let(\u2019s|\u2018s|\u2019)?\s+me|正在|我需要|请稍等|"
+        r"先|让我|马上|先读|读一下|待我|稍等|ok|好的).{0,40}$",
+        re.I)
+    return bool(pats.search(t))
+
+
+def _spawn_summary_waiter(meeting_id, folder, out_name, prompt_text, label):
+    """发 prompt 到纪要会话（工作区每次会议新会话 / 或固定会话），后台线程等回复并写入文件。
+
+    同一会议的多个纪要请求（整场/分段/语义分段）串行执行，防止并发同会话时
+    wait_for_reply 抢到同一个回复导致输出串台。
+
+    写入前做「占位符/超短」校验：若 DSH 只回了意图话而没给实质纪要，则**不回写**
+    （保留已有的正确文件；若还没有旧文件或旧文件同样为空壳，则留待人工重试），
+    避免把占位符当真纪要持久化并用于后续展示/归档。
+    """
+    def _run():
+        with _MEETING_LOCKS_LOCK:
+            lock = _MEETING_LOCKS.setdefault(meeting_id, threading.Lock())
+        with lock:
+            try:
+                client = get_client()
+                sid = _summary_session(client, meeting_id)
+                if not sid:
+                    db.add_log("error", "meeting", "无纪要会话，跳过自动纪要")
+                    return
+                client.clear_stuck(sid)
+                client.prompt(sid, prompt_text, mode="queue")
+                db.add_log("info", "meeting", f"已请求{label} ({os.path.basename(folder)})")
+                reply, _done = client.wait_for_reply(sid, timeout=240, poll=2)
+                path = os.path.join(folder, out_name)
+                had_old = os.path.isfile(path)
+                old = ""
+                if had_old:
+                    try:
+                        old = open(path, encoding="utf-8").read().strip()
+                    except OSError:
+                        old = ""
+                if not (reply and len(reply.strip()) > 10):
+                    db.add_log("warn", "meeting", f"{label} 超时未收到回复")
+                    return
+                if _looks_placeholder(reply):
+                    db.add_log("warn", "meeting",
+                               f"{label} 回复疑似占位/意图话（非实质纪要），本次不回写"
+                               f"{'，保留原文件' if had_old and len(old) > 30 else '（无旧有效内容）'}")
+                    return
+                content_raw = reply.strip()
+                # 写盘内容：调用1（summary.md）为 markdown 纪要；调用2（topics.md）为元数据 JSON
+                if out_name == "topics.md":
+                    obj = _try_load_json(content_raw)
+                    if obj is not None:
+                        content = json.dumps(obj, ensure_ascii=False, indent=2)
+                    else:
+                        content = content_raw + "\n"  # 未能提取 JSON 时按原文回写（可人工修正）
+                else:
+                    content = _sanitize_mermaid(content_raw + "\n")  # markdown 纪要
+                with open(path, "w", encoding="utf-8") as f:
+                    f.write(content)
+                db.add_log("info", "meeting", f"{label}已写入 {out_name}（{len(content)} 字，"
+                           f"{'JSON' if out_name == 'topics.md' and obj is not None else '文本'}）")
+                # 元数据成稿后：用结构化「标题」字段写入 meetings.title，
+                # 会议列表与工作日志「会议纪要：<名称>」用它，更清晰（2026-09-10 起）。
+                if out_name == "topics.md":
+                    _t, _intro, _abs, _segs = _parse_topics_meta(content)
+                    title = (_t or _local_short_title(
+                        open(os.path.join(folder, "summary.md"), encoding="utf-8").read()
+                        if os.path.isfile(os.path.join(folder, "summary.md")) else "")).strip()
+                    if title:
+                        try:
+                            db.update_meeting(meeting_id, title=title[:40])
+                            db.add_log("info", "meeting", f"会议已自动命名：{title}")
+                        except Exception as e:
+                            db.add_log("warn", "meeting", f"保存会议名称失败: {e}")
+                    # 纪要/元数据重新生成后，刷新本地归档材料（meeting_note.md），
+                    # 让后续归档拿到的是成稿版而不是先前的占位版。
+                    _refresh_archived_note(meeting_id)
+            except Exception as e:
+                db.add_log("error", "meeting", f"{label} 生成失败: {e}")
+    threading.Thread(target=_run, daemon=True).start()
+
+
+def regenerate_summary(meeting_id, extra_prompt=""):
+    """重新生成纪要 + 分段摘要（可追加要求）。"""
+    meeting = db.get_meeting(meeting_id)
+    if not meeting:
+        return False, "会议不存在"
+    folder = os.path.join(MEETINGS_DIR, meeting["name"])
+    if not os.path.isfile(os.path.join(folder, "transcript.md")):
+        return False, "转写文件不存在，无法生成纪要"
+    run_id = db.add_summary_run(meeting_id, extra_prompt)
+    if extra_prompt:
+        # 追加要求时只重生成整场纪要（带要求），议题分段保持
+        ok = request_summary(meeting_id, folder)
+    else:
+        ok1 = request_summary(meeting_id, folder)
+        ok2 = request_topic_segments(meeting_id, folder)
+        ok = ok1 and ok2
+    db.finish_summary_run(run_id, "done" if ok else "failed")
+    return ok, "已发送纪要+议题分段生成请求" if ok else "发送请求失败（DSH 可能未运行）"
+
+
+def retranscribe_meeting(meeting_id):
+    """手动重新转写一场会议（后台，并发保护）。"""
+    meeting = db.get_meeting(meeting_id)
+    if not meeting:
+        return False, "会议不存在"
+    name = meeting["name"]
+    folder = os.path.join(MEETINGS_DIR, name)
+    segs = [f for f in os.listdir(folder) if re.match(r"^\d+\.wav$", f)] if os.path.isdir(folder) else []
+    if not segs:
+        return False, "该会议没有音频片段，无法转写"
+    with _retranscribing["lock"]:
+        if name in _retranscribing["set"]:
+            return False, "该会议已在重新转写中，请稍候"
+        if _state["active"] and os.path.basename(_state["folder"] or "") == name:
+            return False, "该会议正在录音中，结束后再重新转写"
+        _retranscribing["set"].add(name)
+
+    def _run():
+        try:
+            _transcribe_meeting(folder)
+        finally:
+            with _retranscribing["lock"]:
+                _retranscribing["set"].discard(name)
+
+    threading.Thread(target=_run, daemon=True).start()
+    return True, f"已开始重新转写（{name}）"
+
+
+# ---------------------------------------------------------------- 查询
+
+def get_meeting_detail(meeting_id):
+    meeting = db.get_meeting(meeting_id)
+    if not meeting:
+        return None
+    folder = os.path.join(MEETINGS_DIR, meeting["name"])
+    return {
+        **meeting,
+        "folder": folder,
+        "speakers": db.get_speakers(meeting_id),
+        "lines": db.get_lines(meeting_id),
+        "summaries": db.get_summary_runs(meeting_id),
+        "hasTranscript": os.path.isfile(os.path.join(folder, "transcript.md")),
+        "hasSummary": os.path.isfile(os.path.join(folder, "summary.md")),
+    }
+
+
+def delete_meeting(meeting_id):
+    """删除会议：DB 记录 + （可选）音频文件。"""
+    meeting = db.get_meeting(meeting_id)
+    if not meeting:
+        return False, "会议不存在"
+    name = meeting["name"]
+    if _state["active"] and os.path.basename(_state["folder"] or "") == name:
+        return False, "该会议正在录音中，不能删除"
+    keep_audio = settings.get("meetingKeepRawAudio", True)
+    if not keep_audio:
+        import shutil
+        folder = os.path.join(MEETINGS_DIR, name)
+        if os.path.isdir(folder):
+            shutil.rmtree(folder, ignore_errors=True)
+    db.delete_meeting(meeting_id)
+    _drop_summary_session(meeting_id)
+    db.add_log("info", "meeting", f"已删除会议 {name}")
+    return True, "已删除"
+
+
+def clean_short_meetings(max_seconds=120):
+    """清理时长 ≤ max_seconds 的会议（DB + 音频/转写文件，彻底删除）。
+
+    返回被删除的会议列表 [{id, name, duration}]；正在录音的会议跳过。
+    """
+    import shutil
+    removed = []
+    for m in db.list_meetings(limit=1000):
+        dur = m.get("duration_seconds") or 0
+        if dur > max_seconds:
+            continue
+        name = m["name"]
+        if _state["active"] and os.path.basename(_state["folder"] or "") == name:
+            continue   # 正在录音，跳过
+        folder = os.path.join(MEETINGS_DIR, name)
+        if os.path.isdir(folder):
+            shutil.rmtree(folder, ignore_errors=True)
+        db.delete_meeting(m["id"])
+        removed.append({"id": m["id"], "name": name, "duration": dur})
+    if removed:
+        db.add_log("info", "meeting", f"已清理 {len(removed)} 个短会议（≤{max_seconds}s）")
+    return removed
+
+
+def import_transcript_fallback():
+    """（预留）旧会议迁移：历史 transcript.md 的首次导入。旧数据不随本仓库提供，暂不实现。"""
+    pass

@@ -1,0 +1,311 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>ECHO 折叠条</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body { height: 100%; }
+  /* 不要写死宽度：WebView2 的 CSS 像素 ≠ 宿主窗口的逻辑像素（150% 缩放时 100 逻辑 ≈ 67 CSS px），
+     写死 width:100px 会让 body 比视口宽、内容向右溢出被裁掉（2026-09-12 实测用户截图即此现象）。
+     这里改为自适应视口，尺寸用 min() 收缩，任何缩放/宽度下都居中且不被裁。 */
+  body {
+    width: 100%; max-width: 100%; overflow: hidden; user-select: none;
+    background: #171a23; color: #e6e9f0;
+    font-family: "Segoe UI", "Microsoft YaHei", system-ui, sans-serif;
+    display: flex; flex-direction: column; align-items: center;
+    padding: 14px 6px 10px; gap: 12px;
+  }
+  /* 标志：两行（EC / HO）+ 2×2 网格，蓝底圆角，像应用图标。
+     尺寸按视口自适应（64 逻辑宽在 150% 缩放下 ≈ 43 CSS px），不写死以免被裁。 */
+  .logo {
+    width: min(38px, 88%); aspect-ratio: 1 / 1; border-radius: 10px;
+    background: linear-gradient(160deg, #4f8cff 0%, #3a6fe0 100%);
+    color: #fff; font-size: 13px; font-weight: 800; line-height: 1;
+    letter-spacing: .5px;
+    display: grid; grid-template-columns: 1fr 1fr; grid-template-rows: 1fr 1fr;
+    place-items: center; padding: 4px 5px 3px;
+    box-shadow: 0 2px 8px rgba(79,140,255,.35);
+    user-select: none;
+  }
+  .logo span { display: block; }
+  .dot { width: 10px; height: 10px; border-radius: 50%; background: #e6b84c; border: 1px solid #2a2f3e; flex: 0 0 auto; }
+  .dot.on { background: #3ecf8e; }
+  .dot.off { background: #ef5b5b; }
+  .sep { width: 30px; height: 1px; background: #2a2f3e; }
+
+  /* 按钮：药丸形实心按钮（不是描边卡片）。宽度按视口自适应（64 逻辑宽 ≈ 43 CSS px），
+     只用百分比以免在窄视口里被裁；竖排文字是小条里最省横向空间的排法。 */
+  .btn {
+    width: min(34px, 82%); border: none; border-radius: 20px;
+    color: #fff; cursor: pointer;
+    writing-mode: vertical-rl; text-orientation: upright;
+    letter-spacing: 2px; font-size: 12px; font-weight: 700;
+    display: grid; place-items: center;
+    padding: 8px 0;
+    box-shadow: 0 3px 10px rgba(0,0,0,.36), inset 0 1px 0 rgba(255,255,255,.14);
+    transition: filter .15s, transform .06s, box-shadow .15s;
+  }
+  .btn:hover { filter: brightness(1.1); }
+  .btn:active { transform: translateY(1px) scale(.985); box-shadow: 0 1px 4px rgba(0,0,0,.4); }
+
+  /* 录音：实心红；录音中更亮并呼吸 */
+  #btnRec { height: 92px; background: linear-gradient(180deg, #ef5b5b, #d64545); }
+  #btnRec.rec { background: linear-gradient(180deg, #ff6b6b, #ef5b5b); animation: pulse 1.6s ease-in-out infinite; }
+  @keyframes pulse { 0%,100% { opacity: 1 } 50% { opacity: .78 } }
+
+  /* 说话：实心蓝 */
+  #btnSay { height: 78px; background: linear-gradient(180deg, #4f8cff, #3a6fe0); }
+  #btnSay.hot { animation: pulse 1.6s ease-in-out infinite; }
+  #btnSay:disabled { filter: grayscale(.35) brightness(.85); cursor: not-allowed; }
+
+  /* 电平：竖排 6 格，自下而上增长。
+     窄视口（64 逻辑宽 ≈ 43 CSS px）下 1px 边框 + 2px 间隙会把格子吃掉、糊成一条线，
+     因此改用"无边框 + 内阴影"表现未点亮态，点亮时纯色 + 外发光（2026-09-12 实测调整）。 */
+  .level { display: flex; flex-direction: column-reverse; gap: 3px; margin-top: 2px; width: 100%; align-items: center; }
+  .level i {
+    width: min(30px, 68%); height: 8px; border-radius: 3px;
+    background: #2b3145; box-shadow: inset 0 0 0 1px #343b52;
+    transition: background .08s, box-shadow .08s;
+  }
+  .level i.hot { background: #3ecf8e; box-shadow: 0 0 7px rgba(62,207,142,.6); }
+  .level i.warn { background: #e6b84c; box-shadow: 0 0 7px rgba(230,184,76,.6); }
+  .level i.clip { background: #ef5b5b; box-shadow: 0 0 7px rgba(239,91,91,.65); }
+
+  /* 状态区：快捷键提示上方，三行小灯（DSH / ECHO / 内网-公网）。
+     折叠条只有 64 逻辑宽（150% 缩放下 ≈64 CSS px，内容区约 52px），所以是"小圆点 + 极短文字"。 */
+  .status { width: 100%; display: flex; flex-direction: column; gap: 5px; align-items: center; }
+  .s-row { display: flex; align-items: center; gap: 4px; width: min(46px, 92%); }
+  .s-dot {
+    width: 7px; height: 7px; border-radius: 50%; background: #4a5163; flex: 0 0 auto;
+    box-shadow: inset 0 0 0 1px rgba(255,255,255,.07);
+  }
+  .s-dot.on { background: #3ecf8e; box-shadow: 0 0 6px rgba(62,207,142,.55); }
+  .s-dot.warn { background: #e6b84c; box-shadow: 0 0 6px rgba(230,184,76,.5); }
+  .s-dot.off { background: #ef5b5b; box-shadow: 0 0 6px rgba(239,91,91,.5); }
+  .s-txt { font-size: 9.5px; color: #98a0b5; line-height: 1; white-space: nowrap; }
+
+  /* 底端：快捷键提示 + 隐藏箭头（用户 2026-09-12 要求：取消自动隐藏，改为点箭头手动隐藏） */
+  .bottom { margin-top: auto; width: 100%; display: flex; flex-direction: column; align-items: center; gap: 8px; }
+  .hide {
+    width: min(30px, 76%); height: 26px; padding: 0;
+    display: grid; place-items: center;
+    background: #232838; color: #98a0b5;
+    border: 1px solid #303748; border-radius: 9px; cursor: pointer;
+    box-shadow: 0 2px 6px rgba(0,0,0,.3);
+    transition: background .15s, color .15s, transform .06s;
+  }
+  .hide:hover { background: #2c3348; color: #cfd6e6; }
+  .hide:active { transform: translateY(1px) scale(.96); }
+  .hide svg { display: block; }
+
+  .hint { font-size: 9.5px; color: #5a6170; line-height: 1.55; text-align: center; }
+  .hint b { color: #8b93a7; font-weight: 600; }
+  .toast { position: fixed; left: 4px; right: 4px; bottom: 64px; background: #262c3d;
+           color: #e6e9f0; font-size: 10px; line-height: 1.4; padding: 5px; border-radius: 7px;
+           text-align: center; opacity: 0; transition: opacity .2s; pointer-events: none; }
+  .toast.show { opacity: 1; }
+</style>
+</head>
+<body>
+  <div class="logo" title="ECHO"><span>E</span><span>C</span><span>H</span><span>O</span></div>
+  <div class="dot" id="dot" title="服务状态"></div>
+
+  <button class="btn" id="btnRec" title="开始/停止会议录音">录音</button>
+
+  <div class="level" id="level" title="麦克风电平（仅会议录音中有效）">
+    <i></i><i></i><i></i><i></i><i></i><i></i>
+  </div>
+
+  <button class="btn" id="btnSay" title="按压说话（快捷键同 Ctrl+Alt+C）">说话</button>
+
+  <div class="bottom">
+    <div class="sep"></div>
+    <!-- 状态区（用户 2026-09-12 要求）：DSH Desktop / ECHO 服务 / 内网-公网 路由 -->
+    <div class="status" id="svcStatus">
+      <div class="s-row" id="rowDsh" title="DSH Desktop 服务状态">
+        <i class="s-dot"></i><span class="s-txt">DSH</span>
+      </div>
+      <div class="s-row" id="rowEcho" title="ECHO 服务状态">
+        <i class="s-dot"></i><span class="s-txt">ECHO</span>
+      </div>
+      <div class="s-row" id="rowNet" title="模型路由：内网优先，内网不通回退公网">
+        <i class="s-dot"></i><span class="s-txt">内网</span>
+      </div>
+    </div>
+    <div class="hint"><b>Ctrl+Shift+E</b><br>展开</div>
+    <button class="hide" id="btnHide" title="隐藏折叠条（鼠标贴屏幕右缘可唤回）" aria-label="隐藏折叠条">
+      <svg viewBox="0 0 24 24" width="14" height="14" aria-hidden="true">
+        <path d="M9 5l7 7-7 7" fill="none" stroke="currentColor" stroke-width="2.6"
+              stroke-linecap="round" stroke-linejoin="round"/>
+      </svg>
+    </button>
+  </div>
+  <div class="toast" id="toast"></div>
+
+<script>
+  // 本页由 ECHO\sidebar\echo-sidebar.exe（WinForms + WebView2）承载在 48px 折叠条里，
+  // 通过 file:// 加载，因此调用 ECHO 的 API 必须用绝对地址。
+  const API = "http://127.0.0.1:8970";
+  const dot = document.getElementById("dot");
+  const btnRec = document.getElementById("btnRec");
+  const btnSay = document.getElementById("btnSay");
+  const btnHide = document.getElementById("btnHide");
+  const bars = [...document.querySelectorAll("#level i")];
+  const toastEl = document.getElementById("toast");
+  const rowDsh = document.getElementById("rowDsh");
+  const rowEcho = document.getElementById("rowEcho");
+  const rowNet = document.getElementById("rowNet");
+
+  /* 状态区：一个小圆点 + 极短文字。cls: "" 灰 | on 绿 | warn 黄 | off 红 */
+  function setSvc(row, cls, text, tip) {
+    if (!row) return;
+    const dot = row.querySelector(".s-dot");
+    if (dot) dot.className = "s-dot" + (cls ? " " + cls : "");
+    const txt = row.querySelector(".s-txt");
+    if (txt) txt.textContent = text;
+    row.title = tip;
+  }
+
+  let recording = false;
+  let busy = false;
+  let toastTimer = null;
+  let levelTimer = null;
+
+  function toast(msg, ms = 2200) {
+    toastEl.textContent = msg;
+    toastEl.classList.add("show");
+    clearTimeout(toastTimer);
+    toastTimer = setTimeout(() => toastEl.classList.remove("show"), ms);
+  }
+
+  async function post(path, body) {
+    const r = await fetch(API + path, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body || {}),
+      signal: AbortSignal.timeout(8000),
+    });
+    if (!r.ok) throw new Error("HTTP " + r.status);
+    return r.json();
+  }
+
+  function renderButtons() {
+    btnRec.textContent = recording ? "停止" : "录音";
+    btnRec.classList.toggle("rec", recording);
+    btnSay.disabled = busy;
+    btnSay.classList.toggle("hot", busy);
+    btnSay.textContent = busy ? "处理中" : "说话";
+  }
+
+  function setLevel(v) {
+    v = Math.max(0, Math.min(1, v || 0));
+    const lit = Math.round(v * bars.length);
+    bars.forEach((b, i) => {
+      b.className = "";
+      if (i < lit) b.className = i >= bars.length - 1 ? "clip" : (i >= bars.length - 2 ? "warn" : "hot");
+    });
+  }
+
+  async function pollStatus() {
+    try {
+      const r = await fetch(API + "/api/status", { signal: AbortSignal.timeout(2500) });
+      if (!r.ok) throw new Error("HTTP " + r.status);
+      const st = await r.json();
+      dot.className = "dot on";
+      recording = !!(st.meeting && st.meeting.active);
+      busy = !!st.busy;
+      if (!recording) setLevel(0);
+      // 服务状态：ECHO 能应答即在线；DSH 看 /api/status 的 dsh.online
+      setSvc(rowEcho, "on", "ECHO", "ECHO 服务在线");
+      const dshOn = !!(st.dsh && st.dsh.online);
+      setSvc(rowDsh, dshOn ? "on" : "off", dshOn ? "DSH" : "DSH×",
+             dshOn ? "DSH Desktop 在线" : "DSH Desktop 离线（命令/会议纪要会受影响）");
+      if (!levelTimer) {
+        // 只有录音/采集期间才有电平，平时不轮询，省开销
+        levelTimer = setInterval(async () => {
+          if (!recording) return;
+          try {
+            const lv = await fetch(API + "/api/audio/level", { signal: AbortSignal.timeout(1500) }).then((x) => x.json());
+            setLevel(lv.level || 0);
+          } catch { setLevel(0); }
+        }, 150);
+      }
+    } catch {
+      dot.className = "dot off";
+      setSvc(rowEcho, "off", "ECHO×", "ECHO 服务不可达");
+      setSvc(rowDsh, "", "DSH", "未知（需 ECHO 服务才能读取 DSH 状态）");
+      setSvc(rowNet, "", "内网", "未知（需 ECHO 服务才能读取路由状态）");
+    }
+    renderButtons();
+  }
+
+  /* 模型路由状态：内网优先，不通则回退公网（读 ECHO 的容灾健康接口） */
+  async function pollNet() {
+    try {
+      const d = await fetch(API + "/api/failover/health", { signal: AbortSignal.timeout(2500) }).then((r) => r.json());
+      if (d.proxy_online === false) {
+        setSvc(rowNet, "warn", "直连", "容灾代理未运行：请求直连内网，无公网回退");
+        return;
+      }
+      const rt = d.routes || {};
+      const at = rt.last_route_at ? "（最近判定 " + rt.last_route_at + "）" : "";
+      if (rt.last_route === "internal") setSvc(rowNet, "on", "内网", "模型走内网" + at);
+      else if (rt.last_route === "public") setSvc(rowNet, "warn", "公网", "内网不通，已回退公网" + at);
+      else if (rt.last_route === "failed") setSvc(rowNet, "off", "失败", "最近一次路由失败" + at);
+      else setSvc(rowNet, "", "内网", "尚无请求，默认优先内网");
+    } catch {
+      setSvc(rowNet, "", "内网", "容灾代理状态不可达");
+    }
+  }
+
+  btnRec.addEventListener("click", async () => {
+    btnRec.disabled = true;
+    try {
+      const r = await post(recording ? "/api/meeting/stop" : "/api/meeting/start");
+      toast(r.message || (recording ? "已停止录音" : "已开始录音"));
+    } catch (e) {
+      toast("操作失败：" + e.message);
+    } finally {
+      btnRec.disabled = false;
+      setTimeout(pollStatus, 400);
+    }
+  });
+
+  btnSay.addEventListener("click", async () => {
+    btnSay.disabled = true;
+    try {
+      const r = await post("/api/assistant/capture", { source: "rail" });
+      toast(r.message || "已开始录音命令");
+    } catch (e) {
+      toast("操作失败：" + e.message);
+    } finally {
+      setTimeout(pollStatus, 600);
+    }
+  });
+
+  // 隐藏箭头：通知宿主把折叠条收到屏右缘（只留 3 逻辑像素），之后鼠标贴右缘即可唤回。
+  // 走 WebView2 内置桥（宿主 Program.cs 的 WebMessageReceived），不依赖 ECHO 服务。
+  btnHide.addEventListener("click", () => {
+    const wv = window.chrome && window.chrome.webview;
+    if (wv && typeof wv.postMessage === "function") {
+      wv.postMessage("rail-hide");
+      return;
+    }
+    toast("仅在折叠条中可隐藏");
+  });
+
+  // 父窗口（echo-sidebar.exe）用 --collapsed 启动本页；它通过 postMessage 通知当前是否收起，
+  // 收起态才值得轮询状态（展开态由主面板负责显示）。
+  window.addEventListener("message", (e) => {
+    if (e.data === "rail-shown") pollStatus();
+  });
+
+  pollStatus();
+  pollNet();
+  setInterval(pollStatus, 3000);
+  setInterval(pollNet, 3000);
+</script>
+</body>
+</html>

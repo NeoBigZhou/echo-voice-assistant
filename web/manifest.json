@@ -1,0 +1,15 @@
+{
+  "name": "ECHO 个人助理",
+  "short_name": "ECHO",
+  "description": "本地语音助理控制面板（DSH 执行 + 会议转写纪要 + 组件管理）",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "orientation": "any",
+  "background_color": "#0f1117",
+  "theme_color": "#0f1117",
+  "icons": [
+    { "src": "/web/icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any" },
+    { "src": "/web/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any" }
+  ]
+}

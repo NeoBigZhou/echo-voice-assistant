@@ -1,0 +1,26 @@
+[project]
+name = "echo"
+version = "0.1.0"
+description = "ECHO — 个人语音助理（本地转写 + DSH 执行 + 会议纪要 + 控制面板）"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.30",
+    "pydantic>=2.7",
+    "faster-whisper>=1.1",
+    "funasr>=1.2",
+    "sherpa-onnx>=1.10",
+    "sounddevice>=0.5",
+    "soundfile>=0.12",
+    "numpy>=1.26",
+    "edge-tts>=7.0",
+    "pyannote.audio>=4.0",
+]
+
+[tool.setuptools]
+packages = ["app", "app.audio"]
+
+[tool.ruff]
+line-length = 110
+target-version = "py311"

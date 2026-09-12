@@ -1,0 +1,7 @@
+{
+  "name": "echo-host",
+  "version": "0.2.0",
+  "private": true,
+  "type": "module",
+  "description": "ECHO 语音助手托管插件：随 DSH Desktop 自动启动/守护 ECHO Python 服务（8970），并提供右侧仪表盘边条（Ctrl+Shift+E）"
+}
