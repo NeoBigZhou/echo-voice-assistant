@@ -48,6 +48,31 @@ def optional_auth(authorization: str = Header(default="")):
     return row
 
 
+# ---------------------------------------------------------------- 路径安全
+# 2026-09-13 安全审计 HIGH-1：所有"由请求参数拼出来的文件路径"都必须过这里。
+# os.path.join 本身不做任何净化：第二个参数是绝对路径时会**整段替换**前面的目录，
+# 含 `..` 时也会逃出去。所以拼完必须用 realpath 复核最终落点。
+_MEETING_FILE_KINDS = {"transcript", "topics", "summary"}
+
+
+def _meeting_dirname(name) -> str:
+    """会议目录名：只取最后一段，杜绝 name 里混入分隔符或 ..（库里的值正常不会）。"""
+    return os.path.basename(str(name or "").replace("\\", "/").rstrip("/"))
+
+
+def _safe_under(base: str, *parts):
+    """把 parts 拼到 base 之下，返回绝对路径；一旦逃出 base 就返回 None。
+
+    判定用 realpath（解析掉 .. 与符号链接），并比较 base + 分隔符前缀，
+    避免 "/data/meetings-evil" 这种同前缀旁路。
+    """
+    base_real = os.path.realpath(base)
+    target = os.path.realpath(os.path.join(base_real, *parts))
+    if target == base_real or not target.startswith(base_real + os.sep):
+        return None
+    return target
+
+
 # ---------------------------------------------------------------- 模型
 class CommandIn(BaseModel):
     text: str
@@ -471,12 +496,16 @@ def get_meeting(mid: int, _auth=Depends(optional_auth)):
 
 @router.get("/meetings/{mid}/audio")
 def meeting_audio(mid: int, seg: int = 1, _auth=Depends(optional_auth)):
-    """返回某段录音 wav（支持 Range，供前端同步播放）。"""
+    """返回某段录音 wav（支持 Range，供前端同步播放）。
+
+    `seg` 是 int、`{seg:02d}` 不会带分隔符；会议目录名仍走 _safe_under 兜底
+    （万一库里的 name 被写进奇怪值，也不至于跑到会议目录之外）。
+    """
     m = db.get_meeting(mid)
     if not m:
         raise HTTPException(status_code=404, detail="会议不存在")
-    path = os.path.join(meeting.MEETINGS_DIR, m["name"], f"{seg:02d}.wav")
-    if not os.path.isfile(path):
+    path = _safe_under(meeting.MEETINGS_DIR, _meeting_dirname(m["name"]), f"{seg:02d}.wav")
+    if not path or not os.path.isfile(path):
         raise HTTPException(status_code=404, detail="音频段不存在")
     from fastapi.responses import FileResponse
     return FileResponse(path, media_type="audio/wav", filename=f"seg{seg:02d}.wav")
@@ -566,11 +595,23 @@ def meeting_file(mid: int, kind: str = "transcript", _auth=Depends(optional_auth
     kind=summary → summary.md（markdown 纪要，前端 mdToHtml 直接渲染）；
     kind=topics → topics.md（元数据 JSON，前端解析标题/简介/摘要/分段）。
     兼容旧格式：summary.md 若为老结构化 JSON 则拆包成「摘要+纪要」markdown。
-    返回 {"exists", "content"}。"""
+    返回 {"exists", "content"}。
+
+    安全（2026-09-13 HIGH-1）：kind 以前没有任何校验就直接拼进路径，`os.path.join` 遇到
+    `..` 或绝对路径会整段逃出会议目录 ——
+        GET /api/meetings/1/file?kind=../../../../Users/<用户名>/Documents/机密备忘
+        GET /api/meetings/1/file?kind=C:/Users/<用户名>/Obsidian库/工作日志/...
+    因为后缀固定拼 `.md`，对全是 .md 的笔记库等于"任意文件读取"。现在三重收口：
+    白名单 kind、目录名取 basename、最终路径必须仍在会议根目录内（realpath 判定）。
+    """
+    if kind not in _MEETING_FILE_KINDS:
+        raise HTTPException(status_code=400, detail="kind 不合法")
     m = db.get_meeting(mid)
     if not m:
         raise HTTPException(status_code=404, detail="会议不存在")
-    path = os.path.join(meeting.MEETINGS_DIR, m["name"], f"{kind}.md")
+    path = _safe_under(meeting.MEETINGS_DIR, _meeting_dirname(m["name"]), f"{kind}.md")
+    if not path:
+        raise HTTPException(status_code=400, detail="非法路径")
     if not os.path.isfile(path):
         return {"exists": False, "content": ""}
     with open(path, "r", encoding="utf-8") as f:

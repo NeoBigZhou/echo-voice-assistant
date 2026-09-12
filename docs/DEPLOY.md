@@ -122,6 +122,10 @@ ECHO 的 API（8970）与容灾代理（8899）默认**不要求 token**，因�
 现在有两层防护（`app/netguard.py`，两个服务都装了）：
 
 1. **CORS 只放行回环来源**（不再是 `allow_origins=["*"]`），跨站页面拿不到响应；
+3. **路径穿越收口**：`GET /meetings/{id}/file?kind=` 的白名单只允许 `transcript` / `topics` / `summary`，
+   目录名取 basename，且最终路径必须仍在 `data/meetings/` 内（realpath 判定）；
+   `/meetings/{id}/audio` 同样有兜底。没有这一层，`kind=../../..` 或 `kind=C:/...` 就能读走磁盘上
+   任意 `.md`（`os.path.join` 遇到绝对路径会整段替换掉前面的目录）。
 2. **Host / Origin 守卫中间件**：`Host` 或 `Origin` 不是 `127.0.0.1` / `localhost` / `::1` 一律 **403**。
    这一层还顺带封死 **DNS Rebinding**（攻击者域名先解析到真实 IP 过校验、再改指 127.0.0.1），
    并且挡住"简单请求"式的跨站写入（那种请求浏览器不预检，只收紧 CORS 是拦不住的）。
