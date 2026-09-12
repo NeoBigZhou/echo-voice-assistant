@@ -137,6 +137,18 @@ ECHO 通过 JSON-RPC 风格接口与会话交互，把技能（skills）能力�
 插件 `plugin/echo-host/` 是可选的：它让 DSH 启动时顺带守护 ECHO，并在 DSH 升级后自动重装；
 ECHO 也可以完全脱离 DSH 独立启动（转写、会议、面板都不依赖它），只把"执行"这一步留白。
 
+## 安全
+
+* API 与容灾代理**只监听 `127.0.0.1`**，并且装了来源守卫（`app/netguard.py`）：
+  `Host` / `Origin` 非回环一律 403，跨站页面既读不到数据也发不出有效写入，
+  **DNS Rebinding** 与 `Origin: null`（`file://`、sandbox iframe）同样被拒。
+  这一层是必要的，因为本地 API 默认不带 token——没有它，你打开的任意网页都能
+  `POST /api/meeting/start` 让 ECHO 用服务进程开麦录音再把音频下载走。
+* 不要为了手机访问把服务绑到 `0.0.0.0`：保持回环绑定，前面套带认证的反向代理
+  （Caddy/Nginx + Basic Auth + TLS），并开启 `apiAuthEnabled` + Bearer Token。详见 [docs/DEPLOY.md](docs/DEPLOY.md#7-安全本机-api-只允许本机访问)。
+* 数据库、录音、历史、日志都在 `data/`（不入 git）；真实凭据只放在环境变量或
+  `~/.dsh/.credentials.yaml`，`dsh-failover/config.json` 已在 `.gitignore` 里。
+
 ## 许可与致谢
 
 本项目以 **MIT** 许可发布，见 [LICENSE](LICENSE)。

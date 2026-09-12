@@ -108,6 +108,34 @@ dotnet build sidebar\echo-sidebar.csproj -c Release
 | `.ps1` 脚本报"字符串缺少终止符" | 脚本被存成了**无 BOM 的 UTF-8 且含非 ASCII**，PowerShell 5.1 按 ANSI 读就会坏。本仓库脚本一律纯 ASCII 或带 BOM，见 [powershell-编码与脚本经验.md](powershell-编码与脚本经验.md) |
 | 面板显示"连接失败" | ECHO 没起来 / 端口被占。看 `data\logs\echo-server.log.err`，或 `scripts\restart-echo.ps1` |
 
+## 7. 安全：本机 API 只允许本机访问
+
+ECHO 的 API（8970）与容灾代理（8899）默认**不要求 token**，因为它们只监听 `127.0.0.1`。
+但"只监听回环"并不等于安全：**你打开的任意网页**，其 JS 都能访问 `http://127.0.0.1:8970`。
+在早期版本里这构成一条完整攻击链——页面可以
+
+* 读走会议原始录音、逐字转写、LLM 纪要（`GET /api/meetings` + `/audio` / `/file`）；
+* `POST /api/meeting/start` 让 **ECHO 服务进程**开始录音（不需要浏览器麦克风权限、也不会亮录音指示灯），
+  随后把音频下载走——**可远程触发的窃听**；
+* `POST /api/assistant/command` 让大模型执行任意指令、`POST /models/download` 拉几 GB 占满磁盘。
+
+现在有两层防护（`app/netguard.py`，两个服务都装了）：
+
+1. **CORS 只放行回环来源**（不再是 `allow_origins=["*"]`），跨站页面拿不到响应；
+2. **Host / Origin 守卫中间件**：`Host` 或 `Origin` 不是 `127.0.0.1` / `localhost` / `::1` 一律 **403**。
+   这一层还顺带封死 **DNS Rebinding**（攻击者域名先解析到真实 IP 过校验、再改指 127.0.0.1），
+   并且挡住"简单请求"式的跨站写入（那种请求浏览器不预检，只收紧 CORS 是拦不住的）。
+   `Origin: null`（`file://`、sandbox iframe）也拒绝，所以折叠条页面改为经
+   `http://127.0.0.1:8970/web/rail.html` 同源加载。
+
+**副作用（预期）**：用局域网 IP 从手机或别的机器访问面板会 403。
+
+**手机访问的正确姿势**：不要为此把服务绑到 `0.0.0.0`。保持 127.0.0.1 绑定，前面套一个带认证的反向代理
+（Caddy / Nginx + Basic Auth + TLS），只对代理放行；同时打开 ECHO 的 `apiAuthEnabled` 并用
+`POST /api/keys` 生成 Bearer Token。这样暴露面收敛到"代理 + 认证"这一层，而不是把裸 API 交给整个局域网。
+
+> 提示：`GET /api/status` 设计上不需要 token（面板首页要显示状态），所以**它也不该被反向代理公开暴露**。
+
 ## 附：端口一览
 
 | 端口 | 用途 |

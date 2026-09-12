@@ -257,12 +257,15 @@ internal sealed class SidebarForm : Form
 
     private readonly WebView2 _web = new();
     private readonly string _baseUrl;
-    private readonly string _railPath;      // 折叠条页面（可为 null → 用内嵌兜底）
+    private readonly string _railPath;      // 折叠条页面本地路径（兜底用）
+    private readonly string _railUrl;       // 折叠条页面 HTTP 地址（与 API 同源，优先使用）
     private readonly bool _startCollapsed;
     private bool _railMode;
     private bool _docking;
     private int _pendingWidth;
     private System.Windows.Forms.Timer _dockTimer;
+    private int _railRetry;                              // 折叠条页面加载重试计数
+    private System.Windows.Forms.Timer _railRetryTimer;  // 重试定时器（ECHO 重启期间用）
 
     // ---- 窄条显示/隐藏（2026-09-12 用户改为：不再自动隐藏；点底部箭头隐藏，鼠标贴屏右缘唤回）----
     private System.Windows.Forms.Timer _railTimer;   // 200ms 轮询：隐藏态下判断鼠标是否贴到屏右缘
@@ -273,6 +276,8 @@ internal sealed class SidebarForm : Form
     {
         _baseUrl = url;
         _railPath = railPath;
+        // 折叠条页面走 ECHO 的 HTTP 服务：与 API 同源，不需要 CORS，也不受来源守卫影响
+        _railUrl = string.IsNullOrEmpty(url) ? null : url.TrimEnd('/') + "/web/rail.html";
         _startCollapsed = collapsed;
         _pendingWidth = width < SidebarConfig.MinPanelWidth ? SidebarConfig.DefaultWidth : width;
         _railVisible = true;
@@ -388,6 +393,8 @@ internal sealed class SidebarForm : Form
             // 页面 → 宿主的桥：窄条底部"隐藏箭头"用 window.chrome.webview.postMessage("rail-hide") 通知宿主。
             // 走 WebView2 内置桥而不是绕 ECHO 的 HTTP + 命名管道，少一跳且不依赖 ECHO 在跑。
             _web.CoreWebView2.WebMessageReceived += OnWebMessage;
+            // 折叠条页面加载失败要重试（ECHO 启动/重启期间会连不上）
+            _web.CoreWebView2.NavigationCompleted += OnNavigationCompleted;
             _web.CoreWebView2.NewWindowRequested += (_, e) =>
             {
                 e.Handled = true;
@@ -545,6 +552,16 @@ internal sealed class SidebarForm : Form
         {
             if (_railMode)
             {
+                // 折叠条改为经 ECHO 的 HTTP 服务加载（与 API 同源）。
+                // 为什么不能再用 file://（2026-09-13 CRITICAL-1 修复的连带改动）：
+                // API 现在有来源守卫，file:// 页面发出的请求带 Origin: null 会被 403 拒绝
+                // （守卫必须拒 null，否则 sandbox iframe 之流又能绕回来）。同源加载后连
+                // CORS 都不需要。ECHO 没起来时先重试，重试期间退回本地文件/内嵌兜底。
+                if (!string.IsNullOrEmpty(_railUrl) && _railRetry < 6)
+                {
+                    _web.CoreWebView2?.Navigate(_railUrl + "?t=" + DateTime.Now.Ticks);
+                    return;
+                }
                 if (!string.IsNullOrEmpty(_railPath) && File.Exists(_railPath))
                 {
                     var uri = new Uri(_railPath).AbsoluteUri;
@@ -558,6 +575,29 @@ internal sealed class SidebarForm : Form
             _web.CoreWebView2?.Navigate(_baseUrl);
         }
         catch (Exception ex) { Program.Log("navigate failed: " + ex.Message); }
+    }
+
+    /// <summary>
+    /// 折叠条页面加载失败就重试（ECHO 可能正在启动/重启）；连续失败 6 次后 LoadContent 会
+    /// 退回本地文件或内嵌兜底页面（此时守卫会拒掉它的跨域请求，界面会显示"不可达"状态）。
+    /// </summary>
+    private void OnNavigationCompleted(object sender, Microsoft.Web.WebView2.Core.CoreWebView2NavigationCompletedEventArgs e)
+    {
+        if (e.IsSuccess) { _railRetry = 0; return; }
+        if (!_railMode) return;
+        if (_railRetry >= 6) { Program.Log($"rail page load gave up after {_railRetry} retries ({e.WebErrorStatus})"); return; }
+        _railRetry++;
+        Program.Log($"rail page load failed ({e.WebErrorStatus}) retry={_railRetry}");
+        if (_railRetryTimer == null)
+        {
+            _railRetryTimer = new System.Windows.Forms.Timer { Interval = 700 };
+            _railRetryTimer.Tick += (_, _) =>
+            {
+                _railRetryTimer.Stop();
+                if (_railMode) LoadContent();
+            };
+        }
+        _railRetryTimer.Start();
     }
 
     // ------------------------------------------------------------- 吸附/尺寸

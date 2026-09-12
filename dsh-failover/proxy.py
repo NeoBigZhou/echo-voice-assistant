@@ -27,6 +27,7 @@ import asyncio
 import json
 import os
 import re
+import sys
 import time
 from pathlib import Path
 
@@ -306,6 +307,15 @@ async def _try_public(cfg, client, body, incoming_headers):
 # ---------------------------------------------------------------------------
 def create_app(cfg: Config):
     app = FastAPI(title="dsh-failover-proxy", version="1.0.0")
+    # 同一个来源守卫：本代理是 OpenAI 兼容端点、且自动带上你真实的 key，
+    # 若允许任意网页调用，等于给外部页面一个"免费用你额度"的入口
+    # （无自定义头的 POST 属于简单请求，浏览器不会预检、请求照样会被发出）。
+    try:
+        sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+        from app import netguard
+        netguard.install(app)
+    except Exception as e:      # 独立部署（脱离 ECHO 仓库）时不致命，但要能看见
+        print(f"[proxy] 未能装载来源守卫 netguard: {e}", file=sys.stderr)
     client = make_client(cfg)
 
     @app.on_event("shutdown")

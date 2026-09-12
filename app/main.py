@@ -34,7 +34,6 @@ except Exception:
     pass
 
 from fastapi import FastAPI
-from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 
 import app.db as db
@@ -68,13 +67,12 @@ async def lifespan(app: FastAPI):
 def create_app():
     app = FastAPI(title="ECHO 个人助理", version="0.1.0", lifespan=lifespan)
 
-    # 移动端/面板同源均可访问（未来手机 App 需要）
-    app.add_middleware(
-        CORSMiddleware,
-        allow_origins=["*"],
-        allow_methods=["*"],
-        allow_headers=["*"],
-    )
+    # 本地 API 来源守卫（2026-09-13 安全审计 CRITICAL-1）：
+    # CORS 收紧到回环来源 + Host/Origin 中间件拒绝非回环请求（同时封 DNS Rebinding）。
+    # 原来是 allow_origins=["*"]，等于「任意网页都能读走会议录音、并 POST 让 ECHO 开麦录音」。
+    # 判定细则、攻击面与副作用见 app/netguard.py 顶部注释。
+    from app import netguard
+    netguard.install(app)
     app.include_router(router)
 
     # 静态面板：禁用缓存（no-store），避免浏览器缓存旧版 app.js/index.html 导致面板异常
