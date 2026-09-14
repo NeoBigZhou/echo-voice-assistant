@@ -1,0 +1,59 @@
+#!/bin/sh
+# ECHO 公开库提交守卫 —— 阻止本机私有内容被误提交。
+#
+# 为什么需要它：.gitignore 只在"普通 git add"时生效；`git add -f` 会绕过它，
+# 而下面这些文件一旦进了公开库就是真实事故：
+#   - dsh-failover/config.json : 含真实内网网关地址与 userId（.gitignore 已忽略，但 -f 可绕过）
+#   - models/                  : 约 13 GB 模型 + 40 MB 唤醒词权重（.gitignore 已忽略）
+#   - venv/                    : 6 万+ 文件、约 7 GB
+#   - data/                    : 会议录音与纪要（隐私）
+#   - *.credentials/.env/密钥  : 凭据
+#
+# 本钩子检查的是 **提交快照（staged）**，因此无论用什么方式加进来都拦得住。
+# 启用： sh .githooks/pre-commit --install
+set -u
+
+forbidden() {
+    case "$1" in
+        dsh-failover/config.json|dsh-failover/config.json.bak-*|dsh-failover/config.json.bak) return 0 ;;
+        models/*|models)                       return 0 ;;
+        venv/*|venv)                           return 0 ;;
+        data/*|data)                           return 0 ;;
+        .credentials.yaml|*/.credentials.yaml) return 0 ;;
+        *.env|.env|.env.*)                     return 0 ;;
+        *.secret|*.secret.*|secrets/*|.dsh/secrets/*) return 0 ;;
+        scripts/echo-startup.vbs)              return 0 ;;
+        *.db|*.db-wal|*.db-shm|*.sqlite|*.sqlite3) return 0 ;;
+    esac
+    return 1
+}
+
+if [ "${1:-}" = "--install" ]; then
+    hookdir=$(git rev-parse --git-dir)/hooks
+    mkdir -p "$hookdir"
+    cp "$0" "$hookdir/pre-commit"
+    chmod +x "$hookdir/pre-commit"
+    echo "已安装提交守卫: $hookdir/pre-commit"
+    exit 0
+fi
+
+bad=$(git diff --cached --name-only --diff-filter=ACM | while IFS= read -r f; do
+    if [ -n "$f" ] && forbidden "$f"; then printf '%s\n' "$f"; fi
+done)
+
+if [ -n "$bad" ]; then
+    echo ""
+    echo "✗ 提交被拒绝：以下文件属于本机私有内容，不得进入公开库"
+    echo ""
+    printf '    %s\n' $bad
+    echo ""
+    echo "  这些内容不应公开（含真实内网地址 / 会议隐私 / 大量模型权重）。"
+    echo "  config.json 已由 .gitignore 忽略，若你是用 git add -f 强制加入的，请先撤销："
+    echo "      git restore --staged <文件>"
+    echo ""
+    echo "  确实需要提交时（确认无隐私）： git commit --no-verify"
+    echo ""
+    exit 1
+fi
+
+exit 0
