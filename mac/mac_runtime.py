@@ -40,8 +40,13 @@ def toggle_sidebar():
 
 
 def autostart_sidebar():
-    """macOS 没有 Windows 右缘边条，启动时保持浏览器面板静默。"""
-    return "skip: macOS has no sidebar"
+    """macOS 没有 Windows 右缘边条，启动时不弹面板。
+
+    「启动时自动显示折叠条」（panelAutoStart）按定义只在 panelOpenMode=sidebar 时生效，
+    而 mac 上 panelOpenMode 固定为 browser（见 run_mac.py），所以这里保持静默；
+    用户要面板用 panelHotkey（默认 Ctrl+Shift+E）或直接开浏览器。
+    """
+    return "skip: macOS 无右缘边条（panelOpenMode=browser）"
 
 
 def open_panel_window():

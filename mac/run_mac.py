@@ -32,6 +32,27 @@ _config.DEFAULTS["device"]["value"] = "cpu"
 # 去掉会强制改回 sidebar 的迁移
 _config.DEFAULT_MIGRATIONS.pop("panelOpenMode", None)
 
+# 上面的 DEFAULTS 只对"库里还没有这个键"的全新安装生效（seed_defaults 不覆盖已有值）。
+# 从 Windows 数据目录继承过来的库里往往还是 sidebar/app，而 mac 没有右缘边条 →
+# 在 seed_defaults（app/main.py 启动时调用）之后把残留值纠正成 browser，
+# 否则面板「设置 → 语音与命令」里会显示一个 Mac 上根本不存在的选项。
+_orig_seed_defaults = _config.Settings.seed_defaults
+
+
+def _mac_seed_defaults(self):
+    _orig_seed_defaults(self)
+    try:
+        cur = _config.db.get_setting("panelOpenMode")
+        if cur is not None and str(cur).lower() != "browser":
+            _config.db.set_setting("panelOpenMode", "browser")
+            self._cache = None        # 丢弃缓存，让后续 settings.get() 重新读库
+            print(f"[mac] panelOpenMode {cur!r} → 'browser'（macOS 无右缘边条）")
+    except Exception as e:
+        print(f"[mac] panelOpenMode 纠正失败: {e}")
+
+
+_config.Settings.seed_defaults = _mac_seed_defaults
+
 # ---- 2) 注入 Mac 版 runtime / hotkey（必须在 import app.main 之前）----
 # 注意顺序：先注册 app.hotkey，再 import mac_runtime（它顶部会 from app.hotkey import）
 import hotkey_mac  # noqa: E402
@@ -48,7 +69,13 @@ import tts_mac  # noqa: E402
 
 tts_mac.patch(_tts)
 
-# ---- 4) 启动 ----
+# ---- 4) 通知补丁：Windows 气球通知 → macOS 通知中心 ----
+import app.assistant as _assistant  # noqa: E402
+import notify_mac  # noqa: E402
+
+_assistant.notify = notify_mac.notify
+
+# ---- 5) 启动 ----
 from app.main import main  # noqa: E402
 
 if __name__ == "__main__":

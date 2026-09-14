@@ -9,6 +9,8 @@
 「系统设置 → 隐私与安全性 → 辅助功能 / 输入监控」里给终端或 Python 授权，
 未安装或未授权时本模块优雅降级：热键不可用，但面板录音等一切照常。
 """
+import time
+
 # Windows 命名键 → pynput 键名
 _NAMED = {
     "SPACE": "<space>", "ENTER": "<enter>", "RETURN": "<enter>", "TAB": "<tab>",
@@ -90,6 +92,16 @@ class HotkeyListener:
             self._listener = keyboard.GlobalHotKeys(mapping)
             self._listener.daemon = True
             self._listener.start()
+            # pynput 在 macOS 上"未授权"是**在线程内异步失败**的：start() 本身不抛异常，
+            # 监听线程随即退出并把原因打到 stderr。所以这里等一小会儿确认线程还活着，
+            # 否则会出现「组件状态显示在线、但按键毫无反应」。
+            time.sleep(0.4)
+            if not self.is_alive():
+                self.error = ("热键监听未能启动：请在 系统设置 → 隐私与安全性 → "
+                              "辅助功能 / 输入监控 里给本程序授权后重试")
+                self._listener = None
+                print(f"[hotkey-mac] {self.error}")
+                return
             print(f"[hotkey-mac] 已注册热键: {list(mapping)}")
         except Exception as e:
             self.error = ("热键启动失败，请在 系统设置 → 隐私与安全性 → 辅助功能/IP监控 "
@@ -114,7 +126,6 @@ def run_once(seconds=15, settings_get=None, callback=None):
     seen = []
     hk = HotkeyListener(g, on_trigger=callback or (lambda s, d: seen.append((s, d))))
     hk.start()
-    import time
     time.sleep(seconds)
     hk.shutdown()
     return seen
