@@ -19,7 +19,7 @@
 > 若必须放在中文路径下：另建一个 ASCII 目录联接指向该 venv，并把解释器路径写进环境变量
 > `ECHO_PYTHON`（所有脚本都优先使用它）：
 > ```powershell
-> New-Item -ItemType Junction -Path C:\echo-venv -Target D:\学习\ECHO\venv
+> New-Item -ItemType Junction -Path C:\echo-venv -Target <你的ECHO目录>\venv
 > setx ECHO_PYTHON C:\echo-venv\Scripts\python.exe
 > ```
 
