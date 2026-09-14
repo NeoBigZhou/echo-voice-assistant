@@ -10,9 +10,10 @@ ECHO 自己**不做推理**，只负责录音、转写、编排、面板与播�
 
 ```
 热键/唤醒词 → 录音 → 本地转写(SenseVoice / Whisper / Qwen3-ASR / sherpa)
-   → DSH 会话执行(可调用技能) → 极简结论语音播报 + 历史入库
+  → DSH 会话执行(可调用技能) → 极简结论语音播报 + 历史入库
 会议录音 → 分段存档 → 转写 → 说话人分离(可选) → DSH 生成纪要 → SQLite 管理
 控制面板 → 组件状态与启停 / 设置 / 历史 / 会议管理 / 模型清单与下载
+模型路由 → 多个上游组成「模型组」按通道号顺序派发（DSH 侧只认 ECHO AUTO）
 ```
 
 ## 本地 / 联网（重要：哪些数据会出网）
@@ -39,13 +40,9 @@ ECHO 自己**不做推理**，只负责录音、转写、编排、面板与播�
 - **右缘边条**：**ECHO 启动后自动**在屏幕右缘显示一条 64px 折叠条（录音、电平、说话、状态灯），
   `Ctrl+Shift+E` 展开/收起；不想自动显示可在 设置 → 语音与命令 关掉（`panelAutoStart`），
   也可设成"启动即展开面板"（`panelStartCollapsed=false`）。
-- **模型面板**：设置页列出每个功能需要的模型、体积、落地路径与就绪状态，能从 ModelScope / HF 镜像一键下载。
-- **可被其他应用调用**：本地 REST API（转写、TTS、会议、设置），面板与手机 App 共用同一入口。
-- **指令只要一句结论**：提示词要求模型先给极简结论再给详情，语音只念结论，详情留在会话里。
-- **会议纪要**：分段录音、按需/常驻双转写引擎、说话人分离（pyannote）、纪要归档可委派给你自己的技能。
-- **右缘边条**：**ECHO 启动后自动**在屏幕右缘显示一条 64px 折叠条（录音、电平、说话、状态灯），
-  `Ctrl+Shift+E` 展开/收起；不想自动显示可在 设置 → 语音与命令 关掉（`panelAutoStart`），
-  也可设成"启动即展开面板"（`panelStartCollapsed=false`）。
+- **模型路由（ECHO AUTO）**：把多个上游（内网网关 / 公网 API / 任意 OpenAI 兼容端点）组成
+  「模型组」，按通道号顺序派发并自动故障转移 + 熔断，DSH 里只需选一个 `ECHO AUTO`
+  （见下文「模型路由」）。
 - **模型面板**：设置页列出每个功能需要的模型、体积、落地路径与就绪状态，能从 ModelScope / HF 镜像一键下载。
 - **可被其他应用调用**：本地 REST API（转写、TTS、会议、设置），面板与手机 App 共用同一入口。
 
@@ -61,6 +58,7 @@ ECHO 自己**不做推理**，只负责录音、转写、编排、面板与播�
 | 合成 | edge-tts（在线，自然）→ Windows SAPI（离线兜底） |
 | 面板 | 原生 HTML/CSS/JS SPA（无构建链，响应式，可直接在手机浏览器打开） |
 | 边条 | .NET 7 WinForms + WebView2（`sidebar/`） |
+| 模型路由 | 本机 OpenAI 兼容代理（`dsh-failover/`，默认 `127.0.0.1:8899`）：多上游派发 + 探测 + 熔断 |
 | 执行层 | DeepSeek Harness Desktop 2.x 本地 API（默认 `http://127.0.0.1:43120`） |
 
 ## 快速开始
@@ -74,29 +72,40 @@ python -m venv venv
 # 有 NVIDIA 显卡时（可选，转写提速明显）：
 #   .\venv\Scripts\python.exe -m pip install torch --index-url https://download.pytorch.org/whl/cu128
 
-powershell -File scripts\setup.ps1              # 校验 venv/依赖/模型，并建库
+powershell -File scripts\setup.ps1              # 校验 venv/依赖/模型 + 建库（一次性）
 powershell -File scripts\start.ps1 -Background  # 后台启动
+powershell -File scripts\start-all.ps1          # 或：一键（含 DSH 检查）
 # 打开面板：http://127.0.0.1:8970
 ```
 
+开机自启：`powershell -File scripts\install-autostart.ps1`（卸载加 `-Remove`）。
+
 首次使用建议：
+
 1. 面板 → **设置 → 模型**：点一下把 `SenseVoice`（默认转写引擎，约 896MB）下载好；
 2. 面板 → **设置 → 语音**：确认热键（默认 `Ctrl+Alt+C` 说话、`Ctrl+Shift+E` 面板）；
-3. 面板 → **启动**：查看各组件状态，缺什么点什么（DSH 执行引擎需要另行安装 DSH Desktop）。
+3. 面板 → **启动**：查看各组件状态，缺什么点什么（DSH 执行引擎需要另行安装 DSH Desktop）；
+4. 想在 DSH 里用**模型路由**：面板 → **模型路由** 页签配置通道，再到 DSH 把模型选成 `ECHO AUTO`。
 
-更细的安装、显卡、非 ASCII 路径、开机自启、边条编译、插件部署见 **[docs/DEPLOY.md](docs/DEPLOY.md)**。
+更细的安装、显卡、非 ASCII 路径、开机自启、边条编译、插件部署见 **[docs/DEPLOY.md](docs/DEPLOY.md)**；
+逐项核对清单见 **[docs/新机器部署指南.md](docs/新机器部署指南.md)**。
 
-## 模型从哪来
+## 目录结构
 
-仓库**不含**模型权重（体积大、且部分上游有授权限制）。三条路：
-
-| 方式 | 适用 |
-|---|---|
-| 面板 → 设置 → 模型 → **下载** | SenseVoice、Whisper 各档、Qwen3-ASR、sherpa 流式（走 ModelScope / hf-mirror 镜像） |
-| 首次使用时自动下载 | SenseVoice 走 ModelScope 缓存；Whisper 走 HF 镜像缓存 |
-| 从别处拷贝 | 说话人分离（pyannote，HF 上是 gated 模型）与 KWS 唤醒词模型：按模型面板里给的**落地路径**放对目录即可 |
-
-面板会显示每一项的体积、目标路径与当前是否就绪，落地路径是**代码约定**（改名会加载不到）。
+```
+echo-voice-assistant/
+├── app/            Python 后端（db/config/dsh/assistant/meeting/boot/audio/modelinfo/router…）
+├── web/            控制面板 SPA（index.html / app.js / app.css）+ 右缘折叠条 rail.html
+├── models/         本地模型（不入 git；用面板下载或自行拷贝）
+├── data/           echo.db、录音、历史、日志（不入 git）
+├── assets/         提示音等资源
+├── plugin/         DSH Desktop 宿主插件源码（echo-host：托管 ECHO + 右侧仪表盘边条）
+├── sidebar/        右缘折叠条/边条宿主（.NET 7 WinForms + WebView2，echo-sidebar.exe）
+├── dsh-failover/   模型路由（本机 8899）：多个上游组成「模型组」，DSH 侧只认 ECHO AUTO
+├── scripts/        setup / start / stop / 自启 / 插件部署 / 一键安装向导
+├── docs/           部署指南、新机器部署指南、纪要归档说明、PowerShell 编码经验
+└── .dsh/skills/    DSH 技能（随仓库提供 meeting-record；其余按需自建）
+```
 
 ## 配置
 
@@ -114,45 +123,97 @@ powershell -File scripts\start.ps1 -Background  # 后台启动
 | `worklogEnabled` / `worklogVaultRoot` / `worklogMode` | 纪要归档：把归档委派给你自己的技能（见 [docs/worklog.md](docs/worklog.md)） |
 | `apiAuthEnabled` | 开启后除 `/api/status` 外都需要 `Authorization: Bearer <token>` |
 
-## 常用 API
+## 模型路由（ECHO AUTO）
 
-| 端点 | 说明 |
+ECHO 自带一个**本机模型路由**（`dsh-failover/proxy.py`，只监听 `127.0.0.1:8899`）：把多个上游
+（公司内网网关、DeepSeek 官方、任意 OpenAI 兼容端点…）组成一个「模型组」，**按通道号顺序派发**；
+前面的通道连不上、首字节超时或返回 401/429/5xx 时自动改走下一个（连续失败会短暂熔断该通道，
+冷却后再试）。
+
+**为什么不由 DSH 自己做**：DSH 的 `agent-default-model` 只存单一 `{provider, model}`，
+重试也只在同一 provider 内 —— 跨上游派发只能放在本机；路由对 DSH 是一个普通 provider，
+所以也不会把 DSH 拖进整轮失败。
+
+**怎么用**：ECHO 启动时 `boot` 自动拉起路由、并把它注册成 DSH 的本地 provider `echo-auto`
+（写 `~/.dsh/settings.yaml`，幂等，可在设置里关），到 DSH 里把模型选成 **ECHO AUTO** 即可。
+面板顶部 **模型路由** 页签就是它的控制台：**通道号 = 派发顺序**（按列表位置自动生成），
+每条通道一个可改的**昵称**（= `config.json` 里成员的 `name`），可开关通道 / 立即探测 /
+看「派发情况」统计。
+
+| 项 | 说明 |
 |---|---|
-| `GET /api/status` | 组件状态 + DSH + 会议 + 忙闲 + 转写引擎加载状态 |
-| `GET/PUT /api/settings` | 配置读写（带分组/类型元数据） |
-| `POST /api/assistant/command` | 发送文本命令 `{text, source}` |
-| `POST /api/assistant/capture` | 触发一次录音命令流 |
-| `POST /api/models/download` | 下载指定模型（`GET /api/models` 看清单与进度） |
-| `POST /api/system/restart` | 重启 ECHO 服务 |
-| `POST /api/boot/component/{id}/start\|stop` | 组件启停（dsh / stt-cmd / stt-meeting / tts / wake / hotkey） |
-| `POST /api/meeting/start\|stop` | 会议录音开关 |
-| `GET /api/meetings` · `GET /api/meetings/{id}` | 会议列表 / 详情 |
-| `POST /api/meetings/{id}/summary/regenerate` | 重新生成纪要 |
-| `POST /api/stt/transcribe` · `/api/stt/sentences` | 转写为文本 / 带时间戳句子（可被其他应用调用） |
-| `GET /api/logs` · `GET /api/events` | 日志 / 事件流 |
+| 配置 | `dsh-failover/config.json`（`groups`、成员、超时、熔断参数）；从 `config.example.json` 复制修改；命令行 `powershell -File dsh-failover\start.ps1` / `stop.ps1` / `status.ps1` |
+| 凭据 | `config.json` 只写凭据**名字**（如 `DEEPSEEK_API_KEY`），真实值从 `~/.dsh/.credentials.yaml` 读，密钥不落仓库 |
+| 健康 | `GET /api/failover/health`（注册态 + 各通道 `通道号 昵称` + 派发/熔断统计） |
+| 细节 | 探测与熔断口径、已知边界见 [dsh-failover/README.md](dsh-failover/README.md) |
 
-转写 API 示例：
+## 模型从哪来
 
-```bash
-curl -X POST http://127.0.0.1:8970/api/stt/transcribe \
-  -F "file=@录音.mp3" -F "engine=sensevoice" -F "lang=zh"
+仓库**不含**模型权重（体积大、且部分上游有授权限制）。三条路：
+
+| 方式 | 适用 |
+|---|---|
+| 面板 → 设置 → 模型 → **下载** | SenseVoice、Whisper 各档、Qwen3-ASR、sherpa 流式（走 ModelScope / hf-mirror 镜像） |
+| 首次使用时自动下载 | SenseVoice 走 ModelScope 缓存；Whisper 走 HF 镜像缓存 |
+| 从别处拷贝 | 说话人分离（pyannote，HF 上是 gated 模型）与 KWS 唤醒词模型：按模型面板里给的**落地路径**放对目录即可 |
+
+面板会显示每一项的体积、目标路径与当前是否就绪，落地路径是**代码约定**（改名会加载不到）。
+
+**Qwen3-ASR（可选，会议/命令转写更准）**：
+
+```powershell
+powershell -File scripts\install-qwen3asr.ps1   # 装依赖(qwen-asr) + 下载模型(~1.5GB)
 ```
 
-## 目录结构
+装好后在 设置 → 会议 → 会议转写模型 选择 `qwen3asr`（命令引擎 `sttModel` 也可选）。
+模型经 modelscope 缓存加载（`~/.cache/modelscope`，无中文路径兼容问题）。
 
+## DSH Desktop 宿主插件（echo-host）
+
+`plugin/echo-host/` 是挂到 DSH Desktop 上的 Cordis 插件，随 DSH Desktop 启动：
+
+- 自动拉起 / 守护 ECHO Python 服务（8970），崩溃自动重启；**DSH Desktop 退出时不停止 ECHO**
+  （ECHO 常常是独立启动的，早先"随 DSH 一起关"导致一重启 DSH 服务就没了）；
+- 仪表盘热键 `Ctrl+Shift+E`：由 **ECHO 服务进程自己注册**（`app/hotkey.py` 的 `RegisterHotKey`，
+  与 `Ctrl+Alt+C` 同一套机制），按一下打开仪表盘窗口。
+  插件侧的 Electron 窗口/热键在 **DSH Desktop 2.0.9 上不可用**：从 `app.asar.unpacked` 动态
+  import 得到的 `electron` 只有 `net/systemPreferences`（渲染/工具进程子集），没有
+  `app/BrowserWindow/screen/globalShortcut`（2026-09-12 实测，见插件文件日志）。
+
+面板热键/打开方式可在 面板 → 设置 → 语音 里改：`panelHotkey`（默认 `Ctrl+Shift+E`，支持
+`Ctrl+Shift+Space`、`Ctrl+Alt+F1` 等）、`panelOpenMode`（`app`=Chromium 应用窗口 / `browser`=默认浏览器）。
+热键本身由 ECHO 服务注册，所以改完只重启 ECHO 即可（不用动 DSH）。
+
+**部署（源码改动后必须重跑）**：
+
+```powershell
+powershell -File scripts\install-echo-host-plugin.ps1            # 部署 + 自检
+powershell -File scripts\install-echo-host-plugin.ps1 -Quiet     # 启动时自愈（无输出）
+powershell -File scripts\install-echo-host-plugin.ps1 -Uninstall # 卸载
 ```
-echo-voice-assistant/
-├── app/            Python 后端（db/config/dsh/assistant/meeting/boot/audio/modelinfo…）
-├── web/            控制面板 SPA（index.html / app.js / app.css）+ 折叠条 rail.html
-├── models/         本地模型（不入 git；用面板下载或自行拷贝）
-├── data/           echo.db、录音、历史、日志（不入 git）
-├── assets/         提示音等资源
-├── sidebar/        .NET 7 右缘边条源码（dotnet build -c Release）
-├── plugin/         DSH Desktop 宿主插件（可选：让 DSH 启动时守护 ECHO）
-├── scripts/        安装 / 启停 / 自启 / 插件部署 / 重启等 PowerShell 脚本
-├── docs/           部署指南、纪要归档说明、PowerShell 编码经验
-└── .dsh/skills/    随仓库提供的 DSH 技能（meeting-record：用语音开关会议录音）
-```
+
+脚本把源码复制到 `<DSH 安装目录>\resources\app.asar.unpacked\echo-host\`，并在 **Profile 补丁层**
+`%USERPROFILE%\.dsh\profiles\<活动 profile>\cordis.patch.yml` 里维护注册行（标记块
+`# >>> echo-host plugin ... >>>`，`id: echo-host` + 指向部署副本的 `file:///` URL），最后用 DSH
+自带 loader 代码**离线校验**（补丁能否解析、行是否进树、入口文件是否存在、模块能否 import），
+校验不过即报错退出，避免"下次启动才炸"。
+
+> ⚠ **要写到哪个 profile？** Desktop 只用它**当前活动**的那个 Profile。安装脚本自动读取
+> `%APPDATA%\DSH Desktop\profile-selection\state.json` 的 `active` 字段，然后为活动 profile 与
+> `desktop` 两个 profile 各写一份注册行，避免切 profile 丢插件。
+> 手工排查时先确认这个字段，别再默认往 `desktop` 里写。
+
+> ⚠ **DSH Desktop 2.0.9 不再读取 `app.asar.unpacked\cordis.patch.yml`**（2.0.5 会读）。2026-09-12
+> 从 2.0.5 升到 2.0.9 后插件"静默消失"，就是补丁放在那个目录里、Loader 实时清单中一行都没有。
+> 现在注册行放在 Profile 补丁层（Desktop 的组合顺序：bundle 层 → Profile 层 → 机器层
+> `~\.dsh\cordis.patch.yml`）。
+>
+> ⚠ **Profile 补丁层只在 DSH Desktop 启动时组合**：部署后必须**重启 DSH Desktop** 才生效。
+> `scripts\launch-desktop.ps1`（桌面快捷方式）与 `scripts\start.ps1`（开机自启）每次启动都会自动
+> 补装（自愈），所以 DSH 升级后启动一次 ECHO 即可；也可手动重跑上面的部署命令。
+>
+> ⚠ 该补丁文件里**不要写非 ASCII 注释**：Windows PowerShell 5.1 会把无 BOM 的 UTF-8 当 ANSI 读，
+> 读回时会把行读串、YAML 直接坏掉（本工具只写 ASCII 注释，并在写入前用 yaml 解析器校验）。
 
 ## 与 DSH Desktop 的关系
 
@@ -163,9 +224,64 @@ ECHO 通过 JSON-RPC 风格接口与会话交互，把技能（skills）能力�
 插件 `plugin/echo-host/` 是可选的：它让 DSH 启动时顺带守护 ECHO，并在 DSH 升级后自动重装；
 ECHO 也可以完全脱离 DSH 独立启动（转写、会议、面板都不依赖它），只把"执行"这一步留白。
 
+## 常用 API（面板/手机 App/技能共用）
+
+| 端点 | 说明 |
+|---|---|
+| `GET /api/status` | 组件状态 + DSH + 会议 + 忙闲 + 转写引擎加载状态 |
+| `GET/PUT /api/settings` | 配置读写（入库，带分组/类型元数据） |
+| `POST /api/assistant/command` | 发送文本命令 `{text, source}` |
+| `POST /api/assistant/capture` | 触发一次录音命令流 |
+| `POST /api/models/download` | 下载指定模型（`GET /api/models` 看清单与进度） |
+| `POST /api/system/restart` | 重启 ECHO 服务 |
+| `GET /api/boot/status` | 启动编排状态（组件 + 进度 + 汇总） |
+| `POST /api/boot/component/{id}/start\|stop` | 组件启动/重试/停止（dsh/stt-cmd/stt-meeting/tts/wake/hotkey） |
+| `POST /api/meeting/start\|stop` | 会议录音开关 |
+| `GET /api/meetings` · `GET /api/meetings/{id}` | 会议列表 / 详情 |
+| `POST /api/meetings/{id}/speaker/rename\|merge` | 说话人改名 / 合并 |
+| `POST /api/meetings/{id}/summary/regenerate` | 重新生成纪要（含语义分段） |
+| `POST /api/control/dsh/start\|stop` | DSH 服务管理 |
+| `POST /api/control/stt/unload` | 卸载转写模型（释放显存） |
+| `POST /api/control/tts/test` | 语音合成测试播报 |
+| `POST /api/control/wake/start\|stop` | 唤醒词监听开关 |
+| `POST /api/control/hotkey/start\|stop` | 热键监听开关 |
+| `GET /api/failover/health` | 模型路由健康（注册态 + 各通道 `通道号 昵称` + 派发/熔断统计） |
+| `GET /api/logs` · `GET /api/events` | 日志 / 事件流 |
+
+## 转写服务（可被其他应用调用）
+
+ECHO 提供本地转写 API，其他应用/脚本可直接上传音频获取转写结果（离线、自动 GPU）：
+
+```bash
+# 转写为文本（engine: sensevoice/qwen3asr/sherpa/whisper 模型名）
+curl -X POST http://127.0.0.1:8970/api/stt/transcribe \
+  -F "file=@录音.mp3" -F "engine=sensevoice" -F "lang=zh"
+
+# 转写为带时间戳的句子（qwen3asr 原生句子 + ForcedAligner 时间戳）
+curl -X POST http://127.0.0.1:8970/api/stt/sentences \
+  -F "file=@录音.wav" -F "engine=qwen3asr" -F "model=0.6B" -F "lang=zh"
+# → {"text": "...", "sentences": [{"start": 1.0, "end": 4.0, "text": "..."}]}
+
+# 查询转写引擎加载状态（已加载模型 / GPU 设备）
+curl http://127.0.0.1:8970/api/stt/status
+```
+
+Python 调用：
+
+```python
+import requests
+r = requests.post("http://127.0.0.1:8970/api/stt/transcribe",
+                  files={"file": open("录音.wav", "rb")},
+                  data={"engine": "qwen3asr", "lang": "zh"})
+print(r.json()["text"])
+```
+
+支持 wav/mp3/flac 等常见格式（自动转 16k 单声道）；模型懒加载，首次调用较慢、之后常驻复用；
+上传上限 512MB；开启 `apiAuthEnabled` 后需带 `Authorization: Bearer <token>`（`POST /api/keys` 生成）。
+
 ## 安全
 
-* API 与容灾代理**只监听 `127.0.0.1`**，并且装了来源守卫（`app/netguard.py`）：
+* API 与模型路由**只监听 `127.0.0.1`**，并且装了来源守卫（`app/netguard.py`）：
   `Host` / `Origin` 非回环一律 403，跨站页面既读不到数据也发不出有效写入，
   **DNS Rebinding** 与 `Origin: null`（`file://`、sandbox iframe）同样被拒。
   这一层是必要的，因为本地 API 默认不带 token——没有它，你打开的任意网页都能
@@ -176,6 +292,12 @@ ECHO 也可以完全脱离 DSH 独立启动（转写、会议、面板都不依�
   （明文仅在创建时返回一次）。开启 `apiAuthEnabled` 前先建好密钥并存到客户端，否则面板自身会被 401。
 * 数据库、录音、历史、日志都在 `data/`（不入 git）；真实凭据只放在环境变量或
   `~/.dsh/.credentials.yaml`，`dsh-failover/config.json` 已在 `.gitignore` 里。
+
+## 项目沿革
+
+ECHO 是把一个早期实验实现（PowerShell 桥 + JSONL/文件状态、三进程互调）**整体重构**而来：
+统一数据库、单进程、REST 唯一入口。转写/唤醒/说话人分离/简报清洗等模型与算法直接继承，
+实验目录已可删除。详细设计见 [ARCHITECTURE.md](ARCHITECTURE.md)。
 
 ## 许可与致谢
 

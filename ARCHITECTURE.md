@@ -49,6 +49,12 @@
 页签实时展示进度与 `source=boot` 日志。`/api/status` 热路径读取缓存的设备
 信息，不再因模型加载而卡顿。
 
+**模型路由（可选组件）**：`dsh-failover/proxy.py`（`127.0.0.1:8899`）把多个上游组成「模型组」，
+按通道号顺序派发，并做主动探测 + 被动健康/熔断（连续失败短暂摘除该通道）；ECHO 启动时把它
+注册成 DSH 的本地 provider `echo-auto`。之所以在本机放一层，是因为 DSH 的 `agent-default-model`
+只存单一 `{provider, model}`、`dsh-llm-retry` 也只在同一 provider 内重试 —— 跨上游派发
+DSH 自己做不到。详见 [dsh-failover/README.md](dsh-failover/README.md)。
+
 ## 3. 数据库设计（data/echo.db，WAL）
 
 版本化迁移：`meta.schema_version` + 顺序迁移列表（`db.MIGRATIONS`），
@@ -137,5 +143,10 @@ SQLite 单库：事务、索引、查询、迁移一应俱全，个人单机规�
 | `app/boot.py` | 启动编排器（组件注册表/状态机/分阶段调度/重试启停） |
 | `app/manager.py` | DSH 进程启停 + 自 pid |
 | `app/services.py` | 组件状态上报/快照 |
+| `app/llm_router.py` | 模型路由配置读写 + 把模型组注册进 DSH（`~/.dsh/settings.yaml`，幂等往返写入） |
+| `app/router_admin.py` | 面板用的路由视图：注册态、成员（通道号/昵称）、派发统计与熔断状态聚合 |
+| `app/failover_proxy.py` | 路由进程的启停/探活（boot 组件「模型路由」的后端） |
 | `app/api.py` / `app/main.py` | REST 路由 + 应用工厂 + 静态托管 |
 | `web/` | 控制面板 SPA |
+| `dsh-failover/` | 模型路由进程（OpenAI 兼容入口 `127.0.0.1:8899`）：按通道派发 + 主动探测 + 熔断 |
+| `sidebar/` | 右缘折叠条/边条宿主（C# WinForms + WebView2，`echo-sidebar.exe`） |
