@@ -110,7 +110,7 @@ dotnet build sidebar\echo-sidebar.csproj -c Release
 
 ## 7. 安全：本机 API 只允许本机访问
 
-ECHO 的 API（8970）与容灾代理（8899）默认**不要求 token**，因为它们只监听 `127.0.0.1`。
+ECHO 的 API（8970）与模型路由（8899）默认**不要求 token**，因为它们只监听 `127.0.0.1`。
 但"只监听回环"并不等于安全：**你打开的任意网页**，其 JS 都能访问 `http://127.0.0.1:8970`。
 在早期版本里这构成一条完整攻击链——页面可以
 
@@ -172,4 +172,4 @@ ECHO 的 API（8970）与容灾代理（8899）默认**不要求 token**，因�
 |---|---|
 | 8970 | ECHO 服务 + 控制面板 + REST API |
 | 43120 | DSH Desktop 本地 API（ECHO 连它执行指令） |
-| 8899 | 模型容灾代理（可选，见 [dsh-failover/README.md](../dsh-failover/README.md)） |
+| 8899 | 模型路由（可选，见 [dsh-failover/README.md](../dsh-failover/README.md)） |

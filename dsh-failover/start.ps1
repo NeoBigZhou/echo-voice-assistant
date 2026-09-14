@@ -1,4 +1,4 @@
-﻿# start.ps1 — 启动 DSH 模型容灾代理（独立常驻服务）
+﻿# start.ps1 — 启动 ECHO 模型路由（独立常驻服务）
 #   后台隐藏启动（默认）：
 #     powershell -ExecutionPolicy Bypass -File dsh-failover\start.ps1
 #   前台运行（调试）：
@@ -51,7 +51,7 @@ $p = Start-Process -FilePath $pyw -ArgumentList $argsList `
 Start-Sleep -Milliseconds 1500
 try {
     $h = Invoke-RestMethod -Uri "http://127.0.0.1:$probe/health" -TimeoutSec 3 -ErrorAction Stop
-    Write-Host "DSH 容灾代理已启动 (PID $($p.Id))  http://127.0.0.1:$probe/health  status=$($h.status)" -ForegroundColor Green
+    Write-Host "ECHO 模型路由已启动 (PID $($p.Id))  http://127.0.0.1:$probe/health  status=$($h.status)" -ForegroundColor Green
 } catch {
     Write-Host "启动失败，请查看日志: $logErr" -ForegroundColor Red
     exit 1
