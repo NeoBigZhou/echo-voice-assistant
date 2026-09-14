@@ -1,4 +1,4 @@
-﻿# stop.ps1 — 停止 DSH 模型容灾代理
+﻿# stop.ps1 — 停止 ECHO 模型路由
 #   用法: powershell -ExecutionPolicy Bypass -File dsh-failover\stop.ps1
 $ErrorActionPreference = 'SilentlyContinue'
 $dir = $PSScriptRoot
@@ -20,9 +20,9 @@ if ($conn) {
         $proc = Get-Process -Id $pid_ -ErrorAction SilentlyContinue
         if ($proc) {
             $proc | Stop-Process -Force
-            Write-Host "已停止代理 PID $pid_ (端口 $probe)"
+            Write-Host "已停止模型路由 PID $pid_ (端口 $probe)"
         }
     }
 } else {
-    Write-Host "代理未在运行 (端口 $probe 无监听)"
+    Write-Host "模型路由未在运行 (端口 $probe 无监听)"
 }

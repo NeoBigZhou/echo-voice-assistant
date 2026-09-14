@@ -73,9 +73,12 @@
   .level i.warn { background: #e6b84c; box-shadow: 0 0 7px rgba(230,184,76,.6); }
   .level i.clip { background: #ef5b5b; box-shadow: 0 0 7px rgba(239,91,91,.65); }
 
-  /* 状态区：快捷键提示上方，三行小灯（DSH / ECHO / 内网-公网）。
-     折叠条只有 64 逻辑宽（150% 缩放下 ≈64 CSS px，内容区约 52px），所以是"小圆点 + 极短文字"。 */
-  .status { width: 100%; display: flex; flex-direction: column; gap: 5px; align-items: center; }
+  /* 状态区：快捷键提示上方，四行（DSH / 模型路由 / ECHO 状态 / 在线时长）。
+     折叠条只有 64 逻辑宽（内容区约 52px），所以是"小圆点 + 极短文字"。
+     2026-09-12 修版式：原来新加的时长/状态是一套"居中纯文字"+ 一颗自适应宽度的灯，
+     与下面三颗固定宽度左对齐的灯不成一条竖线（圆点差 9.5px）。现在统一成同一套行：
+     同一字号、同一行距、圆点左对齐成一列；顺序由用户指定为 DSH → 路由 → 状态 → 时间。 */
+  .status { width: 100%; display: flex; flex-direction: column; gap: 6px; align-items: center; }
   .s-row { display: flex; align-items: center; gap: 4px; width: min(46px, 92%); }
   .s-dot {
     width: 7px; height: 7px; border-radius: 50%; background: #4a5163; flex: 0 0 auto;
@@ -84,12 +87,33 @@
   .s-dot.on { background: #3ecf8e; box-shadow: 0 0 6px rgba(62,207,142,.55); }
   .s-dot.warn { background: #e6b84c; box-shadow: 0 0 6px rgba(230,184,76,.5); }
   .s-dot.off { background: #ef5b5b; box-shadow: 0 0 6px rgba(239,91,91,.5); }
-  .s-txt { font-size: 9.5px; color: #98a0b5; line-height: 1; white-space: nowrap; }
+  .s-dot.busy { background: #4f8cff; box-shadow: 0 0 6px rgba(79,140,255,.55); }   /* 命令处理中 */
+  .s-dot.rec { background: #c07bff; box-shadow: 0 0 7px rgba(192,123,255,.6); }    /* 会议录音中（紫，红只留给故障） */
+  /* 文字位只有 35px（行宽 46 − 圆点 7 − 间距 4）。通道昵称可能偏长，超长以省略号收尾 ——
+     完整昵称 + 通道号仍在悬停说明（title）里，灯上不放"通道N"（用户 2026-09-13 要求）。 */
+  .s-txt {
+    font-size: 9.5px; color: #98a0b5; line-height: 1; white-space: nowrap;
+    flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis;
+  }
 
-  /* 底端：快捷键提示 + 隐藏箭头（用户 2026-09-12 要求：取消自动隐藏，改为点箭头手动隐藏） */
+  /* 在线时长：灯组最后一行，与灯行同轴（左缘对齐），"在线"小一号灰字 + 时长稍亮 */
+  .live { width: 100%; display: flex; align-items: center; justify-content: center; }
+  .live-t {
+    width: min(46px, 92%); font-size: 9.5px; line-height: 1; white-space: nowrap;
+    color: #cfd6e6; font-weight: 600; font-variant-numeric: tabular-nums;
+    overflow: visible;
+  }
+  .live-t .k { font-size: 7.5px; font-weight: 400; color: #5a6170; margin-right: 2px; }
+  /* 极端窄（真实折叠条固定 64 CSS px，理论到不了这）：先让出"在线"二字，只留时长数字 */
+  @media (max-width: 56px) { .live-t .k { display: none; } }
+
+  /* 底端：快捷键提示 + 两个方向箭头（用户 2026-09-12 要求：取消自动隐藏，改为点箭头手动隐藏；
+     2026-09-13 要求：在隐藏箭头左边加一个向左箭头，用于展开成仪表盘边条）。
+     折叠条内容区只有 52px，两个按钮各 min(23px,44%) + 5px 间距 = 51px 才放得下。 */
   .bottom { margin-top: auto; width: 100%; display: flex; flex-direction: column; align-items: center; gap: 8px; }
+  .actions { width: 100%; display: flex; justify-content: center; gap: 5px; }
   .hide {
-    width: min(30px, 76%); height: 26px; padding: 0;
+    width: min(23px, 44%); height: 26px; padding: 0;
     display: grid; place-items: center;
     background: #232838; color: #98a0b5;
     border: 1px solid #303748; border-radius: 9px; cursor: pointer;
@@ -122,25 +146,40 @@
 
   <div class="bottom">
     <div class="sep"></div>
-    <!-- 状态区（用户 2026-09-12 要求）：DSH Desktop / ECHO 服务 / 内网-公网 路由 -->
+    <!-- 状态区（用户 2026-09-12 指定顺序，从上到下）：DSH → 模型路由 → ECHO 状态 → 在线时长。
+         四行同一套「圆点 + 短文字」，圆点对齐成一列；时长行左缘与圆点同列。
+         第一颗灯以外的三行都不是"服务名"，所以灯文字直接用状态词（空闲/处理中/录音中/离线）。 -->
     <div class="status" id="svcStatus">
       <div class="s-row" id="rowDsh" title="DSH Desktop 服务状态">
         <i class="s-dot"></i><span class="s-txt">DSH</span>
       </div>
-      <div class="s-row" id="rowEcho" title="ECHO 服务状态">
-        <i class="s-dot"></i><span class="s-txt">ECHO</span>
+      <div class="s-row" id="rowNet" title="模型路由（ECHO AUTO）：按通道号顺序派发，通道不通自动换下一个">
+        <i class="s-dot"></i><span class="s-txt">路由</span>
       </div>
-      <div class="s-row" id="rowNet" title="模型路由：内网优先，内网不通回退公网">
-        <i class="s-dot"></i><span class="s-txt">内网</span>
+      <div class="s-row" id="rowEcho" title="ECHO 服务状态">
+        <i class="s-dot"></i><span class="s-txt">未知</span>
+      </div>
+      <div class="live" id="live" title="ECHO 服务在线时长">
+        <div class="live-t"><span class="k">在线</span><span id="liveUp">—</span></div>
       </div>
     </div>
     <div class="hint"><b>Ctrl+Shift+E</b><br>展开</div>
-    <button class="hide" id="btnHide" title="隐藏折叠条（鼠标贴屏幕右缘可唤回）" aria-label="隐藏折叠条">
-      <svg viewBox="0 0 24 24" width="14" height="14" aria-hidden="true">
-        <path d="M9 5l7 7-7 7" fill="none" stroke="currentColor" stroke-width="2.6"
-              stroke-linecap="round" stroke-linejoin="round"/>
-      </svg>
-    </button>
+    <div class="actions">
+      <!-- 向左箭头（左边，用户 2026-09-13 要求）：把折叠条展开成仪表盘边条（面板页启动即停在仪表盘页签） -->
+      <button class="hide" id="btnExpand" title="展开成仪表盘边条（快捷键 Ctrl+Shift+E）" aria-label="展开成仪表盘边条">
+        <svg viewBox="0 0 24 24" width="14" height="14" aria-hidden="true">
+          <path d="M15 5l-7 7 7 7" fill="none" stroke="currentColor" stroke-width="2.6"
+                stroke-linecap="round" stroke-linejoin="round"/>
+        </svg>
+      </button>
+      <!-- 向右箭头（右边）：隐藏折叠条，只留屏右缘一条，鼠标贴边唤回 -->
+      <button class="hide" id="btnHide" title="隐藏折叠条（鼠标贴屏幕右缘可唤回）" aria-label="隐藏折叠条">
+        <svg viewBox="0 0 24 24" width="14" height="14" aria-hidden="true">
+          <path d="M9 5l7 7-7 7" fill="none" stroke="currentColor" stroke-width="2.6"
+                stroke-linecap="round" stroke-linejoin="round"/>
+        </svg>
+      </button>
+    </div>
   </div>
   <div class="toast" id="toast"></div>
 
@@ -152,11 +191,28 @@
   const btnRec = document.getElementById("btnRec");
   const btnSay = document.getElementById("btnSay");
   const btnHide = document.getElementById("btnHide");
+  const btnExpand = document.getElementById("btnExpand");
   const bars = [...document.querySelectorAll("#level i")];
   const toastEl = document.getElementById("toast");
   const rowDsh = document.getElementById("rowDsh");
   const rowEcho = document.getElementById("rowEcho");
   const rowNet = document.getElementById("rowNet");
+  const liveUp = document.getElementById("liveUp");
+  const liveBox = document.getElementById("live");
+
+  /* 在线时长：折叠条只有几个字符的宽度，用 1h20m / 20m / 35s 这种最短写法 */
+  function fmtUptime(s) {
+    const t = Math.max(0, Math.round(s || 0));
+    const h = Math.floor(t / 3600), m = Math.floor((t % 3600) / 60), ss = t % 60;
+    if (h >= 100) return "99h+";
+    return h > 0 ? `${h}h${m}m` : (m > 0 ? `${m}m` : `${ss}s`);
+  }
+  /* 中文全称（给 title 用，鼠标悬停看完整口径） */
+  function fmtUptimeLong(s) {
+    const t = Math.max(0, Math.round(s || 0));
+    const h = Math.floor(t / 3600), m = Math.floor((t % 3600) / 60), ss = t % 60;
+    return h > 0 ? `${h}时${m}分` : (m > 0 ? `${m}分${ss}秒` : `${ss}秒`);
+  }
 
   /* 状态区：一个小圆点 + 极短文字。cls: "" 灰 | on 绿 | warn 黄 | off 红 */
   function setSvc(row, cls, text, tip) {
@@ -217,8 +273,17 @@
       recording = !!(st.meeting && st.meeting.active);
       busy = !!st.busy;
       if (!recording) setLevel(0);
-      // 服务状态：ECHO 能应答即在线；DSH 看 /api/status 的 dsh.online
-      setSvc(rowEcho, "on", "ECHO", "ECHO 服务在线");
+      // ECHO 状态（灯组第三行）：绿=空闲 / 蓝=命令处理中 / 紫=录音中 / 红=离线，
+      // 在线时长紧接在灯组最后一行（"在线 1h20m"），口径与面板启动页一致
+      const up = fmtUptime(st.uptime);
+      liveUp.textContent = up;
+      liveBox.title = `ECHO 服务已连续在线 ${fmtUptimeLong(st.uptime)}`;
+      const lv = (st.meeting && st.meeting.active)
+        ? ["rec", "录音中", `会议录音中${st.meeting.folder ? "：" + st.meeting.folder : ""}`]
+        : (st.busy ? ["busy", "处理中", `正在处理一条指令${st.busyPhase ? "（" + st.busyPhase + "）" : ""}`]
+                   : ["on", "空闲", "没有正在执行的任务"]);
+      setSvc(rowEcho, lv[0], lv[1],
+        `ECHO 服务在线 · 已连续在线 ${fmtUptimeLong(st.uptime)} · 当前${lv[1]} · ${lv[2]}`);
       const dshOn = !!(st.dsh && st.dsh.online);
       setSvc(rowDsh, dshOn ? "on" : "off", dshOn ? "DSH" : "DSH×",
              dshOn ? "DSH Desktop 在线" : "DSH Desktop 离线（命令/会议纪要会受影响）");
@@ -234,29 +299,46 @@
       }
     } catch {
       dot.className = "dot off";
-      setSvc(rowEcho, "off", "ECHO×", "ECHO 服务不可达");
+      liveUp.textContent = "—";
+      liveBox.title = "ECHO 服务不可达，读不到在线时长";
+      setSvc(rowEcho, "off", "离线", "ECHO 服务不可达（时长与状态都读不到）");
       setSvc(rowDsh, "", "DSH", "未知（需 ECHO 服务才能读取 DSH 状态）");
-      setSvc(rowNet, "", "内网", "未知（需 ECHO 服务才能读取路由状态）");
+      setSvc(rowNet, "", "路由", "未知（需 ECHO 服务才能读取路由状态）");
     }
     renderButtons();
   }
 
-  /* 模型路由状态：内网优先，不通则回退公网（读 ECHO 的容灾健康接口） */
+  /* 模型路由状态：走排在第一位、且在服的通道=绿 / 改走后面通道=黄 / 全挂=红。
+     折叠条太窄：灯上只放**当前在服通道的昵称**（用户 2026-09-13 要求：不再显示"通道N"），
+     通道号、不可用原因等完整口径放进悬停说明；昵称过长由 .s-txt 的省略号收尾。 */
   async function pollNet() {
     try {
       const d = await fetch(API + "/api/failover/health", { signal: AbortSignal.timeout(2500) }).then((r) => r.json());
       if (d.proxy_online === false) {
-        setSvc(rowNet, "warn", "直连", "容灾代理未运行：请求直连内网，无公网回退");
+        setSvc(rowNet, "warn", "路由", "模型路由进程未运行：ECHO AUTO 暂时不可用（重启 ECHO 可自动拉起）");
         return;
       }
+      const g = (d.groups || []).find((x) => x.id === "echo-auto") || (d.groups || [])[0];
+      const act = (g && g.members || []).filter((m) => m.enabled !== false);
+      if (!act.length) { setSvc(rowNet, "", "路由", "模型组里没有启用的通道"); return; }
+      const nm = (m) => `通道${m.priority} ${m.name}`;               // 完整口径，只进 title
+      const short = (m) => String(m.name || "").trim() || "未命名";  // 灯上只放昵称
+      const up = (m) => m.reachable !== false && m.state !== "open";
+      const first = act[0];
+      const alive = act.filter(up);
       const rt = d.routes || {};
-      const at = rt.last_route_at ? "（最近判定 " + rt.last_route_at + "）" : "";
-      if (rt.last_route === "internal") setSvc(rowNet, "on", "内网", "模型走内网" + at);
-      else if (rt.last_route === "public") setSvc(rowNet, "warn", "公网", "内网不通，已回退公网" + at);
-      else if (rt.last_route === "failed") setSvc(rowNet, "off", "失败", "最近一次路由失败" + at);
-      else setSvc(rowNet, "", "内网", "尚无请求，默认优先内网");
+      const at = rt.last_route_at ? "（最近派发 " + rt.last_route_at + "）" : "";
+      if (up(first)) {
+        setSvc(rowNet, "on", short(first), `请求走 ${nm(first)}` + at);
+      } else if (alive.length) {
+        setSvc(rowNet, "warn", short(alive[0]),
+          `${nm(first)} 当前不可用（${first.last_error || first.detail}），请求改走 ${nm(alive[0])}` + at);
+      } else {
+        setSvc(rowNet, "off", "无可用", "模型组所有通道都不可用：" +
+          act.map((m) => `${nm(m)}（${m.last_error || m.detail}）`).join("；"));
+      }
     } catch {
-      setSvc(rowNet, "", "内网", "容灾代理状态不可达");
+      setSvc(rowNet, "", "路由", "路由状态不可达（ECHO 服务侧读取失败）");
     }
   }
 
@@ -283,6 +365,18 @@
     } finally {
       setTimeout(pollStatus, 600);
     }
+  });
+
+  // 展开箭头（左）：通知宿主把折叠条展开成仪表盘边条。宿主 Expand() 会重新加载主面板，
+  // 而主面板启动即 switchView("dashboard")，所以展开后落在仪表盘页签。
+  // 走同一条 WebView2 桥，不依赖 ECHO 服务（服务没起也能展开，面板自己显示"不可达"）。
+  btnExpand.addEventListener("click", () => {
+    const wv = window.chrome && window.chrome.webview;
+    if (wv && typeof wv.postMessage === "function") {
+      wv.postMessage("rail-expand");
+      return;
+    }
+    toast("仅在折叠条中可展开");
   });
 
   // 隐藏箭头：通知宿主把折叠条收到屏右缘（只留 3 逻辑像素），之后鼠标贴右缘即可唤回。

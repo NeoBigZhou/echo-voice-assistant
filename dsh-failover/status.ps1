@@ -1,4 +1,4 @@
-﻿# status.ps1 — 查看 DSH 模型容灾代理状态与关键配置（隐藏密钥）
+﻿# status.ps1 — 查看 ECHO 模型路由状态与组成员健康（隐藏密钥）
 #   用法: powershell -ExecutionPolicy Bypass -File dsh-failover\status.ps1
 $ErrorActionPreference = 'SilentlyContinue'
 $probe = 8899
@@ -6,33 +6,44 @@ try {
     $h = Invoke-RestMethod -Uri "http://127.0.0.1:$probe/health" -TimeoutSec 3
     Write-Host "运行中: http://127.0.0.1:$probe/health" -ForegroundColor Green
     $conn = Get-NetTCPConnection -LocalPort $probe -State Listen -ErrorAction SilentlyContinue | Select-Object -First 1
-    if ($conn) { $proc = Get-Process -Id $conn.OwningProcess -ErrorAction SilentlyContinue; Write-Host "PID: $($conn.OwningProcess)" }
-    Write-Host ("内网: " + $h.internal)
-    Write-Host ("公网: " + $h.public)
-    Write-Host ("内网Token: " + $(if($h.has_internal_token){'已配置'}else{'缺失'}) + "  公网Key: " + $(if($h.has_public_key){'已配置'}else{'缺失'}))
+    if ($conn) { Write-Host "PID: $($conn.OwningProcess)" }
     Write-Host ""
-    Write-Host "最近路由统计（自本次启动累计）:"
-    $r = $h.routes
-    if ($r) {
-        Write-Host ("  请求总数: " + $r.requests)
-        Write-Host ("  走内网:   " + $r.internal + "   (深绿=internal)")
-        Write-Host ("  走公网:   " + $r.public + "   (回退=public)")
-        Write-Host ("  失败:     " + $r.failed)
-        $route = $r.last_route
-        if ($route -eq 'internal') {
-            Write-Host ("  最近一次: 内网 (internal)  时间 " + $r.last_route_at) -ForegroundColor Cyan
-        } elseif ($route -eq 'public') {
-            Write-Host ("  最近一次: 公网 (public 回退)  时间 " + $r.last_route_at) -ForegroundColor Yellow
-        } elseif ($route -eq 'failed') {
-            Write-Host ("  最近一次: 失败 (failed)  时间 " + $r.last_route_at) -ForegroundColor Red
-        } else {
-            Write-Host "  最近一次: 尚无模型请求"
+    foreach ($g in $h.groups) {
+        Write-Host ("[" + $g.id + "] " + $g.display_name + "   启用 " + $g.active + " 个 / 健康 " + $g.healthy + " 个") -ForegroundColor Cyan
+        foreach ($m in $g.members) {
+            $state = if ($m.enabled -eq $false) { "停用" }
+                     elseif ($m.state -eq 'open') { "熔断" }
+                     elseif ($m.reachable -eq $true) { "可达" }
+                     elseif ($m.reachable -eq $false) { "不可达" }
+                     else { "未判" }
+            $color = if ($state -eq "可达") { "Green" } elseif ($state -eq "停用") { "DarkGray" } else { "Yellow" }
+            $ttfb = if ($null -ne $m.last_ttfb_ms) { "$($m.last_ttfb_ms)ms" } else { "—" }
+            $key = if ($m.has_token) { "" } else { "  [缺凭据]" }
+            Write-Host ("  通道" + $m.priority + " " + $m.name.PadRight(16) + " " + $state.PadRight(4) +
+                        " 成功/失败 " + $m.ok + "/" + $m.fail + "  首字节 " + $ttfb + "  " + $m.detail + $key) -ForegroundColor $color
+            if ($m.last_error) { Write-Host ("       最近错误: " + $m.last_error) -ForegroundColor DarkYellow }
         }
     }
     Write-Host ""
-    Write-Host "想实时看每条请求走哪条: 浏览器打开 http://127.0.0.1:$probe/health（刷新即最新累计）"
+    Write-Host "派发统计（自本次启动累计）:"
+    $r = $h.routes
+    if ($r) {
+        Write-Host ("  请求总数:   " + $r.requests)
+        Write-Host ("  失败:       " + $r.failed)
+        if ($r.last_route_at) {
+            if ($r.last_channel) {
+                Write-Host ("  最近命中:   通道 " + $r.last_channel + " " + $r.last_member + "   时间 " + $r.last_route_at) -ForegroundColor Green
+            } else {
+                Write-Host ("  最近一次:   没有通道接住   时间 " + $r.last_route_at) -ForegroundColor Red
+            }
+        } else {
+            Write-Host "  最近一次:   尚无模型请求"
+        }
+    }
+    Write-Host ""
+    Write-Host "改通道昵称/顺序: ECHO 面板 →「模型路由」页；命令行自检: python dsh-failover\check.py --call"
 } catch {
-    Write-Host "代理未运行 (端口 $probe 无 /health 响应)" -ForegroundColor Yellow
+    Write-Host "模型路由未运行 (端口 $probe 无 /health 响应)" -ForegroundColor Yellow
     Write-Host "启动:  powershell -ExecutionPolicy Bypass -File dsh-failover\start.ps1"
     exit 1
 }

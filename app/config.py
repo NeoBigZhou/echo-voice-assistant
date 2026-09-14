@@ -214,6 +214,34 @@ DEFAULTS = {
     "apiAuthEnabled":   dict(value=False, grp="panel", label="API 鉴权",
                              description="外部触点（手机 App）启用 Bearer Token 校验",
                              value_type="bool"),
+    # ---------- 模型路由（ECHO AUTO）----------
+    # 路由进程把 dsh-failover/config.json 里的 groups 转成 DSH 里的可选模型；
+    # 组的成员/优先级在「模型路由」页签里勾选，这里只放全局行为开关。
+    "routerAutoRegister": dict(value=True, grp="router", label="启动时注册到 DSH",
+                               description="ECHO 启动后自动把模型组写成 DSH 的本地模型（ECHO AUTO）；"
+                                           "关掉后需手动点「模型路由 → 注册到 DSH」",
+                               value_type="bool"),
+    "routerDisplayName":  dict(value="ECHO AUTO", grp="router", label="模型组显示名",
+                               description="DSH 模型列表里看到的名称（改完立即同步注册）",
+                               value_type="str"),
+    "routerProbeInterval": dict(value=45, grp="router", label="健康探测间隔秒",
+                                description="后台探测各成员可达性的间隔（0 表示不改动）；"
+                                            "真实请求本身也会更新健康表",
+                                value_type="int"),
+    "routerFirstByteTimeout": dict(value=20.0, grp="router", label="成员首字节超时秒",
+                                   description="成员接受连接后多久没吐第一个字就算不通、换下一个；"
+                                               "改这项需要重启模型路由进程才生效",
+                                   value_type="float"),
+    "routerConnectTimeout": dict(value=1.5, grp="router", label="成员连接超时秒",
+                                 description="TCP/TLS 握手耐心（故意很短，内网 DNS 失败要秒切）；"
+                                             "改这项需要重启模型路由进程",
+                                 value_type="float"),
+    "routerBreakerThreshold": dict(value=2, grp="router", label="熔断连续失败次数",
+                                   description="某成员连续失败几次后进入熔断、暂时跳过",
+                                   value_type="int"),
+    "routerBreakerCooldown": dict(value=30, grp="router", label="熔断冷却秒",
+                                  description="熔断后多久放行一次试水请求",
+                                  value_type="int"),
 }
 
 # 默认值迁移：早期版本把某个默认值当作"用户已设置"写进了库（seed_defaults 不覆盖已有

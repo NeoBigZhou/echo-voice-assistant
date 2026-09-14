@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>DSH 模型容灾路由</title>
+<title>ECHO LLM 路由</title>
 <style>
   :root { color-scheme: dark; }
   * { box-sizing: border-box; margin: 0; padding: 0; }
@@ -11,134 +11,153 @@
     font-family: "Segoe UI", "Microsoft YaHei", system-ui, sans-serif;
     background: #0f1420; color: #e6e9f0; min-height: 100vh; padding: 24px;
   }
-  .wrap { max-width: 720px; margin: 0 auto; }
+  .wrap { max-width: 860px; margin: 0 auto; }
   h1 { font-size: 20px; margin-bottom: 4px; display: flex; align-items: center; gap: 10px; }
   .sub { color: #8b93a7; font-size: 13px; margin-bottom: 20px; }
-  .card {
-    background: #171e2e; border: 1px solid #252e42; border-radius: 14px;
-    padding: 20px; margin-bottom: 16px;
-  }
-  .big {
-    font-size: 44px; font-weight: 700; letter-spacing: 1px;
-    display: flex; align-items: center; gap: 14px; flex-wrap: wrap;
-  }
+  .card { background: #171e2e; border: 1px solid #252e42; border-radius: 14px; padding: 20px; margin-bottom: 16px; }
+  .big { font-size: 30px; font-weight: 700; display: flex; align-items: center; gap: 14px; flex-wrap: wrap; }
   .dot { width: 14px; height: 14px; border-radius: 50%; display: inline-block; }
-  .st-internal { color: #3ddc84; } .st-public { color: #ffc94d; } .st-failed { color: #ff6b6b; } .st-idle { color: #8b93a7; }
-  .dot-internal { background: #3ddc84; box-shadow: 0 0 12px #3ddc8488; }
-  .dot-public  { background: #ffc94d; box-shadow: 0 0 12px #ffc94d88; }
-  .dot-failed  { background: #ff6b6b; box-shadow: 0 0 12px #ff6b6b88; }
-  .dot-idle    { background: #8b93a7; }
+  .st-ok { color: #3ddc84; } .st-warn { color: #ffc94d; } .st-bad { color: #ff6b6b; } .st-idle { color: #8b93a7; }
+  .dot-ok { background: #3ddc84; box-shadow: 0 0 12px #3ddc8488; }
+  .dot-warn { background: #ffc94d; box-shadow: 0 0 12px #ffc94d88; }
+  .dot-bad { background: #ff6b6b; box-shadow: 0 0 12px #ff6b6b88; }
+  .dot-idle { background: #8b93a7; }
   .state-line { color: #8b93a7; font-size: 14px; margin-top: 8px; }
   .stats { display: flex; gap: 12px; flex-wrap: wrap; margin-top: 16px; }
-  .stat {
-    flex: 1; min-width: 110px; background: #10172a; border-radius: 10px;
-    padding: 12px 14px; text-align: center;
-  }
+  .stat { flex: 1; min-width: 104px; background: #10172a; border-radius: 10px; padding: 12px 14px; text-align: center; }
   .stat .n { font-size: 26px; font-weight: 700; }
   .stat .l { font-size: 12px; color: #8b93a7; margin-top: 2px; }
   .stat.g .n { color: #3ddc84; } .stat.y .n { color: #ffc94d; } .stat.r .n { color: #ff6b6b; } .stat.b .n { color: #6ea8ff; }
   h2 { font-size: 15px; margin-bottom: 10px; color: #c3cadb; }
-  .hist { list-style: none; }
-  .hist li {
-    display: flex; align-items: center; gap: 10px; padding: 8px 2px;
-    border-bottom: 1px dashed #232c40; font-size: 14px;
-  }
-  .hist li:last-child { border-bottom: none; }
-  .hist .t { color: #8b93a7; font-variant-numeric: tabular-nums; min-width: 64px; }
-  .pill {
-    font-size: 12px; padding: 2px 10px; border-radius: 999px; font-weight: 600;
-  }
-  .pill-internal { background: #12341f; color: #3ddc84; }
-  .pill-public  { background: #3a2f10; color: #ffc94d; }
-  .pill-failed  { background: #3a1515; color: #ff6b6b; }
-  .pill-idle    { background: #232c40; color: #8b93a7; }
+  table { width: 100%; border-collapse: collapse; font-size: 13.5px; }
+  th { text-align: left; color: #8b93a7; font-weight: 600; padding: 6px 8px; border-bottom: 1px solid #252e42; }
+  td { padding: 9px 8px; border-bottom: 1px dashed #232c40; vertical-align: top; }
+  tr:last-child td { border-bottom: none; }
+  .pill { font-size: 12px; padding: 2px 10px; border-radius: 999px; font-weight: 600; white-space: nowrap; }
+  .pill-ok { background: #12341f; color: #3ddc84; }
+  .pill-warn { background: #3a2f10; color: #ffc94d; }
+  .pill-bad { background: #3a1515; color: #ff6b6b; }
+  .pill-idle { background: #232c40; color: #8b93a7; }
+  .mono { font-variant-numeric: tabular-nums; }
   .up { color: #8b93a7; font-size: 12px; }
   .up code { background: #10172a; padding: 1px 6px; border-radius: 6px; color: #aeb8cd; word-break: break-all; }
   .note { background: #10172a; border-radius: 10px; padding: 12px 14px; font-size: 12.5px; color: #8b93a7; line-height: 1.7; }
   .live { color: #3ddc84; font-size: 12px; font-weight: 600; }
+  .order { color: #6ea8ff; font-weight: 700; }
 </style>
 </head>
 <body>
 <div class="wrap">
-  <h1>🛰 DSH 模型容灾路由 <span class="live" id="liveTag"></span></h1>
-  <div class="sub">模型下拉选内网模型 → 本代理 → 内网优先，内网连不上自动切公网。</div>
+  <h1>🛰 ECHO LLM 路由 <span class="live" id="liveTag"></span></h1>
+  <div class="sub">DSH 里选「ECHO AUTO」→ 本路由 → 按通道号顺序打，不通才切下一个（成员的增删改在 ECHO 面板「模型路由」页）。</div>
 
   <div class="card">
     <div class="big"><span class="dot dot-idle" id="dot"></span><span class="st-idle" id="state">等待请求…</span></div>
-    <div class="state-line" id="detail">尚无模型请求经过本代理。去 DSH 里发一句话，这里会自动刷新。</div>
+    <div class="state-line" id="detail">尚无模型请求经过本路由。</div>
     <div class="stats">
       <div class="stat b"><div class="n" id="nReq">0</div><div class="l">请求总数</div></div>
-      <div class="stat g"><div class="n" id="nInt">0</div><div class="l">走内网</div></div>
-      <div class="stat y"><div class="n" id="nPub">0</div><div class="l">走公网(回退)</div></div>
-      <div class="stat r"><div class="n" id="nFail">0</div><div class="l">失败</div></div>
+      <div class="stat g"><div class="n" id="nInt">0</div><div class="l" id="lInt">通道1 命中</div></div>
+      <div class="stat y"><div class="n" id="nPub">0</div><div class="l" id="lPub">通道2 命中</div></div>
+      <div class="stat r"><div class="n" id="nFail">0</div><div class="l">全组失败</div></div>
     </div>
   </div>
 
   <div class="card">
-    <h2>路由切换历史（同路由连续请求已合并）</h2>
-    <ul class="hist" id="hist"><li class="up">暂无</li></ul>
+    <h2>模型组与通道（按通道号顺序尝试）</h2>
+    <div id="groups"><div class="up">加载中…</div></div>
   </div>
 
   <div class="card">
-    <h2>上游</h2>
-    <div class="up">内网：<code id="upInt">-</code></div>
-    <div class="up">公网：<code id="upPub">-</code></div>
-    <div class="up">内网Token / 公网Key：<span id="upKeys">-</span></div>
+    <h2>路由历史（同通道连续请求已合并）</h2>
+    <ul class="up" id="hist" style="list-style:none">暂无</ul>
   </div>
 
   <div class="note">
-    💡 <b>怎么读：</b>绿色 = 这次请求打到了<b>内网</b>网关（自建/内网模型）；
-    黄色 = 内网<b>连不上</b>，代理自动改用了<b>公网</b> api.deepseek.com（deepseek-chat）。
-    只有“连不上”才会走公网，内网可达时永远走内网。
+    💡 <b>怎么读：</b>「可达」是后台探测（TCP + <code>GET /models</code>）的结论；
+    真实请求失败连续两次会进入 <b>熔断</b>（冷却 30 秒），期间先试下一个通道。
+    4xx 参数类错误（含上下文超长）<b>不会</b>触发切换，会原样返回给 DSH。
   </div>
 </div>
 
 <script>
 const $ = id => document.getElementById(id);
-const R = {
-  internal: { cls: "st-internal", dot: "dot-internal", pill: "pill-internal", label: "内网" },
-  public:   { cls: "st-public",   dot: "dot-public",   pill: "pill-public",   label: "公网(回退)" },
-  failed:   { cls: "st-failed",   dot: "dot-failed",   pill: "pill-failed",   label: "失败" },
-  idle:     { cls: "st-idle",     dot: "dot-idle",     pill: "pill-idle",     label: "等待请求" },
-};
+function pill(state, reachable, open, enabled) {
+  if (enabled === false) return ["pill-idle", "已停用"];
+  if (open) return ["pill-bad", "熔断中"];
+  if (reachable === true) return ["pill-ok", "可达"];
+  if (reachable === false) return ["pill-bad", "不可达"];
+  return ["pill-idle", "未判定"];
+}
 function refresh() {
   fetch("/health").then(r => r.json()).then(d => {
     const rt = d.routes || {};
-    const last = rt.last_route || "idle";
-    const meta = R[last] || R.idle;
+    const g = (d.groups || [])[0] || {};
     $("liveTag").textContent = "● LIVE";
-    $("state").textContent = last === "internal" ? "内网 ✅"
-      : last === "public" ? "公网（内网不可达回退）"
-      : last === "failed" ? "失败"
-      : "等待请求…";
-    $("state").className = meta.cls;
-    $("dot").className = "dot " + meta.dot;
-    $("detail").textContent = rt.last_route_at
-      ? "最近一次判定于 " + rt.last_route_at + "，请求 #" + rt.requests
-      : "尚无模型请求经过本代理。去 DSH 里发一句话，这里会自动刷新。";
-    $("nReq").textContent = rt.requests; $("nInt").textContent = rt.internal;
-    $("nPub").textContent = rt.public;   $("nFail").textContent = rt.failed;
-    $("upInt").textContent = d.internal || "-";
-    $("upPub").textContent = d.public || "-";
-    $("upKeys").textContent = (d.has_internal_token ? "内网已配置" : "内网缺失") + " / " + (d.has_public_key ? "公网已配置" : "公网缺失");
-    const hist = d.history || [];
-    const ul = $("hist"); ul.innerHTML = "";
-    if (!hist.length) {
-      const li = document.createElement("li"); li.className = "up"; li.textContent = "暂无"; ul.appendChild(li);
-    } else {
-      hist.slice().reverse().forEach(h => {
-        const m = R[h.route] || R.idle;
-        const li = document.createElement("li");
-        const t = document.createElement("span"); t.className = "t"; t.textContent = h.t;
-        const p = document.createElement("span"); p.className = "pill " + m.pill; p.textContent = m.label;
-        const x = document.createElement("span"); x.className = "up"; x.textContent = "请求 #" + h.req;
-        li.append(t, p, x); ul.appendChild(li);
-      });
+
+    // 状态：最近一次请求命中哪个通道 / 全失败 / 还没请求
+    let cls = "st-idle", dotc = "dot-idle", text = "等待请求…";
+    if (rt.requests) {
+      if (rt.failed === rt.requests) { cls = "st-bad"; dotc = "dot-bad"; text = "全部通道都失败"; }
+      else if (rt.last_channel) { cls = "st-ok"; dotc = "dot-ok"; text = `命中 通道${rt.last_channel} ${rt.last_member || ""}`.trim(); }
     }
+    $("state").className = cls; $("state").textContent = text;
+    $("dot").className = "dot " + dotc;
+    $("detail").textContent = rt.last_route_at
+      ? `最近一次派发 ${rt.last_route_at}` + (rt.last_channel ? `（通道 ${rt.last_channel} ${rt.last_member || ""}）`.trim() : "（没有通道接住）") + `，请求 #${rt.requests}`
+      : "尚无模型请求经过本路由。";
+
+    // 计数按通道各自的成功次数（成员自己的 ok），不做位置分类
+    const all = g.members || [];
+    const ch1 = all.find(m => m.priority === 1) || all[0] || null;
+    const rest = all.filter(m => m !== ch1);
+    $("nReq").textContent = rt.requests || 0;
+    $("nInt").textContent = ch1 ? (ch1.ok || 0) : 0;
+    $("nPub").textContent = rest.reduce((s, m) => s + (m.ok || 0), 0);
+    $("lInt").textContent = ch1 ? `通道${ch1.priority} 命中` : "通道1 命中";
+    $("lPub").textContent = rest.some(m => m.priority > 2) ? "通道2+ 命中" : "通道2 命中";
+    $("nFail").textContent = rt.failed || 0;
+
+    const box = $("groups"); box.innerHTML = "";
+    (d.groups || []).forEach(g => {
+      const h = document.createElement("div");
+      h.style.cssText = "margin:6px 0 8px;color:#c3cadb;font-weight:600";
+      h.textContent = `${g.display_name}（路由 id: ${g.id}）`;
+      box.appendChild(h);
+      const t = document.createElement("table");
+      t.innerHTML = "<tr><th>通道</th><th>昵称</th><th>模型</th><th>状态</th><th>成功/失败</th><th>最近TTFB</th><th>最近探测</th><th>最近错误</th></tr>";
+      (g.members || []).forEach((m) => {
+        const [pc, pt] = pill(m.state, m.reachable, m.state === "open", m.enabled);
+        const tr = document.createElement("tr");
+        if (m.enabled === false) tr.style.opacity = ".55";
+        tr.innerHTML = `<td class="order">${m.priority}</td>
+          <td>${m.name}${m.enabled === false ? ' <span class="pill pill-idle">停用</span>' : ''}<div class="up"><code>${m.endpoint}</code></div></td>
+          <td>${m.model}</td>
+          <td><span class="pill ${pc}">${pt}</span></td>
+          <td class="mono">${m.ok} / ${m.fail}</td>
+          <td class="mono">${m.last_ttfb_ms != null ? m.last_ttfb_ms + "ms" : "-"}</td>
+          <td class="mono">${m.last_probe_at || "-"}<div class="up">${m.detail || ""}</div></td>
+          <td class="up">${m.last_error || "-"}</td>`;
+        t.appendChild(tr);
+      });
+      box.appendChild(t);
+    });
+
+    const hist = d.history || []; const ul = $("hist"); ul.innerHTML = "";
+    if (!hist.length) { ul.textContent = "暂无"; }
+    else hist.slice().reverse().forEach(x => {
+      const li = document.createElement("li");
+      li.style.cssText = "display:flex;gap:10px;padding:6px 2px;border-bottom:1px dashed #232c40";
+      const label = x.ok ? "命中" : "失败";
+      li.innerHTML = `<span class="mono" style="min-width:64px">${x.t}</span>
+        <span style="min-width:44px">${label}</span>
+        <span>${x.ok ? `通道${x.channel} ${x.member || ""}`.trim() : "（没有通道接住）"}</span>
+        <span class="up" style="margin-left:auto">请求 #${x.req}</span>`;
+      ul.appendChild(li);
+    });
   }).catch(() => {
     $("liveTag").textContent = "○ 离线";
-    $("state").textContent = "代理未响应";
-    $("state").className = "st-failed"; $("dot").className = "dot dot-failed";
+    $("state").textContent = "路由未响应"; $("state").className = "st-bad";
+    $("dot").className = "dot dot-bad";
   });
 }
 refresh();

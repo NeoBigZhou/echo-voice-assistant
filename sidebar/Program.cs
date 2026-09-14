@@ -133,7 +133,10 @@ internal static class Program
             $"deviceDpi={DeviceDpiOf()}");
 
         // 单实例：已有边条在跑 → 通知它按 --signal 指定的动作处理，然后本进程退出。
-        // --signal 取值：toggle（默认，与热键同义）| rail-hide | rail-show
+        // --signal 取值：toggle（默认，与热键同义）| rail-hide | rail-show | rail-expand
+        //   rail-hide   折叠条收到屏右缘（只留 peek 宽）
+        //   rail-show   隐藏态滑回显示态窄条
+        //   rail-expand 窄条展开成仪表盘边条（与窄条底部向左箭头同义）
         var signal = (ArgValue(args, "--signal") ?? "toggle").Trim();
         if (TrySignalExistingSidebar(signal))
         {
@@ -224,7 +227,11 @@ internal static class Program
                     server.WaitForConnection();
                     using var reader = new StreamReader(server, Encoding.UTF8);
                     var command = reader.ReadToEnd();
-                    if (command.Contains("rail-hide", StringComparison.OrdinalIgnoreCase))
+                    if (command.Contains("rail-expand", StringComparison.OrdinalIgnoreCase))
+                    {
+                        form.BeginInvoke(new Action(() => form.ExpandFromRail("signal")));
+                    }
+                    else if (command.Contains("rail-hide", StringComparison.OrdinalIgnoreCase))
                     {
                         form.BeginInvoke(new Action(form.HideRail));
                     }
@@ -322,14 +329,16 @@ internal sealed class SidebarForm : Form
     {
         // 窄条态：WebView 占满整宽（折叠条内容需要完整宽度，且已取消"点击展开"把手区）。
         // 展开态：左边缘留 GripWidth（逻辑）把手给窗体，用于拖拽调宽。
-        // 例外：滑出/滑入动画期间，WebView 保持展开后的宽度、Left=0（跟着窗口左缘一起动），
+        // 滑出/滑入动画期间（窄条隐藏/出现、折叠条 ⇄ 边条都是）：WebView 宽度固定、Left=0
+        // （展开态再让出 GripWidth 把手，与动画结束后的布局完全一致，收尾不跳），跟着窗口左缘一起动，
         // 超出窗体的部分被裁剪 → 视觉上是"抽屉从屏幕右缘滑出/滑入"，内容是整体平移不重排。
-        if (_railMode && _railSlideWidth > 0)
+        if (_railSlideWidth > 0)
         {
-            var sliding = _docking;
+            var gripNow = _railMode ? 0 : ScaleLogical(SidebarConfig.GripWidth);
+            var wasSliding = _docking;
             _docking = true;
-            try { _web.Bounds = new Rectangle(0, 0, _railSlideWidth, ClientSize.Height); }
-            finally { _docking = sliding; }
+            try { _web.Bounds = new Rectangle(gripNow, 0, Math.Max(1, _railSlideWidth - gripNow), ClientSize.Height); }
+            finally { _docking = wasSliding; }
             return;
         }
         var grip = _railMode ? 0 : ScaleLogical(SidebarConfig.GripWidth);
@@ -353,7 +362,11 @@ internal sealed class SidebarForm : Form
         // 保留占位：折叠条上的控件由页面自己处理，窗口层不再做任何点击动作
     }
 
-    private void ExpandFromRail(string reason)
+    /// <summary>
+    /// 从折叠条展开成仪表盘边条：窄条底部向左箭头（页面消息 "rail-expand"）或
+    /// `--signal rail-expand` 触发。展开会重新加载主面板，而主面板启动即停在仪表盘页签。
+    /// </summary>
+    internal void ExpandFromRail(string reason)
     {
         Program.Log($"expand from rail: {reason}");
         Expand();
@@ -419,7 +432,8 @@ internal sealed class SidebarForm : Form
     }
 
     /// <summary>
-    /// 处理窄条页面的消息（WebView2 桥）："rail-hide" = 点底部箭头隐藏。
+    /// 处理窄条页面的消息（WebView2 桥）："rail-hide" = 点底部右侧箭头隐藏；
+    /// "rail-expand" = 点底部左侧箭头展开成仪表盘边条。
     /// 注意：消息在 UI 线程上到达（WebView2 事件即宿主线程），可直接操作窗体。
     /// </summary>
     private void OnWebMessage(object sender, Microsoft.Web.WebView2.Core.CoreWebView2WebMessageReceivedEventArgs e)
@@ -430,6 +444,7 @@ internal sealed class SidebarForm : Form
         Program.Log("web message: " + msg);
         if (string.Equals(msg, "rail-hide", StringComparison.OrdinalIgnoreCase)) HideRail();
         else if (string.Equals(msg, "rail-show", StringComparison.OrdinalIgnoreCase)) ShowRail("page requested");
+        else if (string.Equals(msg, "rail-expand", StringComparison.OrdinalIgnoreCase)) ExpandFromRail("page requested");
         // 展开态仪表盘右下角箭头：把面板收成折叠条（与 rail-hide 的区别是整窗变窄条）
         else if (string.Equals(msg, "rail-collapse", StringComparison.OrdinalIgnoreCase)) Collapse();
     }
@@ -472,15 +487,28 @@ internal sealed class SidebarForm : Form
     }
 
     // ---- 滑出/滑入动画（用户 2026-09-12 要求"鼠标贴边滑出"）----
-    // 关键点：动画期间 WebView 保持"展开后"的宽度、Left 跟着窗口左缘走，超出部分由父窗口裁剪，
+    // 关键点：动画期间 WebView 宽度固定、Left 跟着窗口左缘走，超出部分由父窗口裁剪，
     // 于是内容整体平移（抽屉从屏幕右缘滑出/滑入）；若让 WebView 跟着窗口一起变窄，
     // 每帧都要重排（内容被压扁再弹开，实测很抖）。
+    // 2026-09-13 用户要求"边条 ⇄ 折叠条也改成折叠条隐藏/出现那种滑动动效"，于是同一套动画
+    // 现在服务三种切换：窄条显示 ⇄ 隐藏（WebView 固定窄条宽）｜折叠条 ⇄ 边条（WebView 固定面板宽）。
     private System.Windows.Forms.Timer _railAnim;
-    private int _railAnimFrom, _railAnimTo, _railAnimStep;
-    private int _railSlideWidth;           // >0 = 动画中，WebView 按此宽度摆放
-    private const int RailAnimSteps = 9;   // 9 帧 × 16ms ≈ 145ms（实测含布局约 150~200ms）
+    private int _railAnimFrom, _railAnimTo, _railAnimStep, _railAnimSteps = RailAnimSteps;
+    private int _railSlideWidth;           // >0 = 动画中，WebView 按此宽度摆放（含 grip 偏移的总宽）
+    private Action _railAnimDone;          // 收尾回调：收起后再换成窄条页，避免滑动途中就看到被压扁的窄条页
+    private const int RailAnimSteps = 9;   // 窄条 9 帧 × 16ms ≈ 145ms（实测含布局约 150~200ms）
+    private const int PanelAnimSteps = 12; // 折叠条 ⇄ 边条跨度大（约 400 物理像素），多几帧 ≈ 190ms 更顺
+    // 逐帧诊断（验证"确实在滑动"而不是跳变）：设 ECHO_SIDEBAR_ANIMLOG=1 才记录，默认不写日志
+    private static readonly bool AnimLogFrames =
+        Environment.GetEnvironmentVariable("ECHO_SIDEBAR_ANIMLOG") == "1";
 
-    private void SlideRailTo(int toPhysical, string reason)
+    /// <param name="slideWidthLogical">
+    /// 动画期间 WebView 的宽度（逻辑像素，含展开态 grip 偏移的总宽）：窄条滑出/滑入传 RailWidth；
+    /// 折叠条 ⇄ 边条传面板宽度 —— WebView 保持面板宽、Left 跟窗口左缘，面板内容整体平移不重排。
+    /// </param>
+    /// <param name="onDone">动画收尾（Bounds 已归位）后的回调。</param>
+    private void SlideRailTo(int toPhysical, string reason, int? slideWidthLogical = null,
+                             Action onDone = null, int? steps = null)
     {
         _railAnim?.Stop();
         if (_railAnim == null)
@@ -491,17 +519,21 @@ internal sealed class SidebarForm : Form
         _railAnimFrom = Width;             // 从当前实际宽度起步，动画中途再触发也能接上
         _railAnimTo = toPhysical;
         _railAnimStep = 0;
-        _railSlideWidth = ToPhysical(SidebarConfig.RailWidth);
-        Program.Log($"rail slide start: {_railAnimFrom} -> {_railAnimTo} physical ({reason})");
+        _railAnimSteps = steps ?? RailAnimSteps;
+        _railSlideWidth = ToPhysical(slideWidthLogical ?? SidebarConfig.RailWidth);
+        _railAnimDone = onDone;
+        Program.Log($"rail slide start: {_railAnimFrom} -> {_railAnimTo} physical, web={_railSlideWidth}, " +
+                    $"{_railAnimSteps} frames ({reason})");
         _railAnim.Start();
     }
 
     private void RailAnimTick()
     {
         _railAnimStep++;
-        double t = (double)_railAnimStep / RailAnimSteps;
+        double t = (double)_railAnimStep / _railAnimSteps;
         double eased = 1 - Math.Pow(1 - t, 3);   // ease-out：起步快、收尾稳
         int w = (int)Math.Round(_railAnimFrom + (_railAnimTo - _railAnimFrom) * eased);
+        if (AnimLogFrames) Program.Log($"rail anim frame {_railAnimStep}/{_railAnimSteps}: w={w}");
         var area = PrimaryWorkArea();
         _docking = true;
         try
@@ -511,12 +543,18 @@ internal sealed class SidebarForm : Form
         }
         finally { _docking = false; }
 
-        if (_railAnimStep >= RailAnimSteps)
+        if (_railAnimStep >= _railAnimSteps)
         {
             _railAnim.Stop();
             _railSlideWidth = 0;
             DockToRightEdge();               // 收尾归位：此时 WebView 宽度与窗口一致
             Program.Log($"rail slide end: width={Width}");
+            var done = _railAnimDone;
+            _railAnimDone = null;
+            if (done != null)
+            {
+                try { done(); } catch (Exception ex) { Program.Log("rail slide callback failed: " + ex.Message); }
+            }
         }
     }
 
@@ -525,6 +563,8 @@ internal sealed class SidebarForm : Form
     {
         _railAnim?.Stop();
         _railSlideWidth = 0;
+        // 丢弃未执行的回调：新动作已接管，旧回调会把页面换成过期内容
+        _railAnimDone = null;
     }
 
     /// <summary>
@@ -550,6 +590,7 @@ internal sealed class SidebarForm : Form
     {
         try
         {
+            Program.Log($"load content: rail={_railMode} retry={_railRetry}");
             if (_railMode)
             {
                 // 折叠条改为经 ECHO 的 HTTP 服务加载（与 API 同源）。
@@ -667,12 +708,14 @@ internal sealed class SidebarForm : Form
         StopRailAnim();           // 动画中按热键展开：先停掉动画，否则动画会继续按窄条宽度改 Bounds
         _railMode = false;
         _railVisible = true;      // 回到展开态：窄条状态复位
-        LayoutWebView();
-        DockToRightEdge();
         if (!Visible) Show();
         BringToFront();
         Activate();
-        LoadContent();
+        LoadContent();            // 先导航：面板是本地服务、毫秒级，滑动过程中已经就位
+        // 与"折叠条隐藏/出现"同一套滑动动效（用户 2026-09-13 要求）：窗口左缘向左滑出面板宽度，
+        // WebView 固定为面板宽度、Left 跟着窗口左缘 → 面板内容整体从屏幕右缘滑出，不重排、不闪。
+        var panelW = DesiredWidth();
+        SlideRailTo(ToPhysical(panelW), "expand", panelW, null, PanelAnimSteps);
     }
 
     public void Collapse()
@@ -685,11 +728,12 @@ internal sealed class SidebarForm : Form
         _railMode = true;
         _railVisible = true;                       // 收起后先显示，之后由底部箭头手动隐藏
         _railWakeArmed = !CursorNearScreenEdge();
-        LayoutWebView();
-        DockToRightEdge();
-        LoadContent();
         if (!Visible) Show();
         StartRailWatch();
+        // 滑动期间 WebView 仍按面板宽度摆放 → 用户看到的是"面板整体向右滑走"；滑完再 LoadContent()
+        // 换成窄条页，否则滑动途中就会看到被压扁成 64px 的窄条页（内容重排，很难看）。
+        var panelW = DesiredWidth();
+        SlideRailTo(ToPhysical(SidebarConfig.RailWidth), "collapse", panelW, LoadContent, PanelAnimSteps);
     }
 
     /// <summary>兜底窄条页面（找不到 web/rail.html 时用）。padLeft 为左补偿像素。</summary>

@@ -34,7 +34,10 @@ body {
 }
 .tab:hover { color: var(--text); background: var(--card2); }
 .tab.active { color: var(--accent); background: var(--card2); font-weight: 600; }
-.top-status { margin-left: auto; font-size: 13px; color: var(--muted); }
+/* 顶栏原来右上角有个"运行 1时20分 · 空闲"的常驻状态（用户 2026-09-12 要求去掉）。
+   连接不上 ECHO 时仍然要能一眼看出来：只加红色标记，正常状态下完全不出现、不占位。 */
+body.echo-offline .topbar { border-bottom-color: var(--red); }
+body.echo-offline .brand { color: var(--red); }
 
 /* ---------- 布局 ---------- */
 /* 2026-09-12：外边距整体收紧（原 20px 上下 + 14px 卡间距在窄边条里显得空） */
@@ -79,6 +82,10 @@ main { max-width: 1200px; margin: 12px auto; padding: 0 14px; }
 .card-title .more:hover { opacity: 1; text-decoration: underline; }
 .card-body.row { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
 .muted { color: var(--muted); font-size: 13px; }
+/* 启动日志标题右侧：在线时长 + 状态徽章（从顶栏搬来，见 app.js renderLiveStatus） */
+.boot-live { display: flex; align-items: center; gap: 8px; font-size: 12px; color: var(--muted); min-width: 0; }
+.boot-live b { color: var(--text); font-variant-numeric: tabular-nums; font-weight: 600; }
+.boot-live .badge { font-size: 12px; padding: 1px 9px; flex-shrink: 0; }
 
 /* ---------- 徽标 / 按钮 / 输入 ---------- */
 .badge {
@@ -102,6 +109,16 @@ main { max-width: 1200px; margin: 12px auto; padding: 0 14px; }
 .btn.primary:hover { background: #6fa1ff; border-color: #6fa1ff; color: #fff; }
 .btn.danger { border-color: var(--red); color: var(--red); }
 .btn.danger:hover { border-color: var(--red); color: var(--red); background: rgba(239,91,91,.12); }
+/* 设置页顶部的「折叠/展开全部」：双箭头图标按钮（2026-09-13 用户要求用双箭头代替文字按钮）。
+   默认不画边框、只用灰箭头（看起来是图标不是按钮），悬停才亮蓝 + 出现边框；
+   箭头方向=点下去会发生什么：还有展开的分组时朝上（折叠），全折叠后翻 180° 朝下（展开）。 */
+.btn.icon {
+  padding: 8px 0; width: 34px; color: var(--muted);
+  background: transparent; border-color: transparent;
+}
+.btn.icon:hover { color: var(--accent); border-color: var(--accent); background: var(--card2); }
+.btn.icon svg { display: block; transition: transform .22s cubic-bezier(.2,.7,.3,1); }
+.btn.icon.unfold svg { transform: rotate(180deg); }
 .btn.primary.danger { background: var(--red); border-color: var(--red); color: #fff; }
 .btn.primary.danger:hover { background: #f47373; border-color: #f47373; color: #fff; }
 .btn.big { padding: 14px 28px; font-size: 16px; font-weight: 600; }
@@ -203,6 +220,8 @@ main { max-width: 1200px; margin: 12px auto; padding: 0 14px; }
 /* ---------- 模型清单（设置 → 模型） ----------
    每条 = 名称 + 状态徽标 / 用途·体积 / 落地路径（等宽，代码约定不改名）/ 获取说明 / 操作按钮。
    路径必须原样展示：用户要照它把文件放对位置。 */
+/* 标题行下的那句说明（2026-09-13 用户要求从标题行下移；标题行只留卡片名 + 就绪情况） */
+.model-hint { font-size: 12px; line-height: 1.5; margin: 0 0 8px; }
 .model-list { display: flex; flex-direction: column; gap: 8px; }
 .model-row {
   background: var(--card2); border: 1px solid var(--border); border-radius: 8px;
@@ -425,11 +444,11 @@ input[type="range"].seek::-moz-range-thumb { width: 13px; height: 13px; border-r
 .lv-error { color: var(--red); }
 .lv-debug { color: var(--muted); }
 
-/* ---------- 模型容灾路由（仪表盘小卡片 + 页签 iframe） ---------- */
+/* ---------- 模型路由（仪表盘小卡片 + 管理页） ---------- */
 .failover-card { cursor: pointer; transition: border-color .15s; }
 .failover-card:hover { border-color: var(--accent); }
-/* 底部一行：容灾卡收窄，右侧留出"收起为折叠条"箭头的位置（用户 2026-09-12 要求）
-   align-items 用默认的 stretch：箭头高度自动跟容灾卡一致（用户要求），chevron 由 grid 居中 */
+/* 底部一行：模型路由卡收窄，右侧留出"收起为折叠条"箭头的位置（用户 2026-09-12 要求）
+   align-items 用默认的 stretch：箭头高度自动跟路由卡一致（用户要求），chevron 由 grid 居中 */
 .fo-wrap { display: flex; gap: 6px; margin-bottom: 10px; }
 .fo-wrap > .card { flex: 1 1 auto; min-width: 0; margin-bottom: 0; }
 .rail-btn {
@@ -444,22 +463,156 @@ input[type="range"].seek::-moz-range-thumb { width: 13px; height: 13px; border-r
 .rail-btn:active { transform: translateY(1px) scale(.96); }
 .rail-btn svg { display: block; }
 .rail-btn.hidden { display: none; }   /* 不在边条里运行时（整窗/浏览器）没有可收起的边条，隐藏 */
-.failover-row { display: flex; align-items: center; gap: 16px; flex-wrap: wrap; }
-.fo-left { display: flex; align-items: center; gap: 10px; min-width: 160px; }
-.fo-dot {
-  width: 12px; height: 12px; border-radius: 50%; background: var(--muted);
-  display: inline-block; flex-shrink: 0;
+/* 模型路由小卡片：第一行 = 🛰️ 模型路由 + 通道徽章（同会议录音的椭圆样式）+ 详情 ›；
+   第二行 = 各通道计数，末尾靠右是上次派发时刻（不带"最近派发"字样）。 */
+.failover-card .card-title {
+  display: flex; align-items: center; gap: 8px;
+  flex-wrap: wrap; min-width: 0; margin-bottom: 2px;
 }
-.fo-state { font-size: 15px; }
-.fo-right { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; flex: 1; min-width: 220px; }
-.fo-k { font-size: 12.5px; color: var(--muted); }
+.failover-card .card-title > .ic { flex-shrink: 0; }
+/* 徽章跟会议录音卡大小一致（.badge 默认 12px），窄栏里也别放大 */
+.failover-card .card-title .badge { font-size: 12px; padding: 1px 9px; }
+.failover-row { display: flex; flex-direction: column; gap: 2px; }
+.fo-right { display: flex; align-items: center; gap: 2px 12px; flex-wrap: wrap; flex: 1 1 100%; min-width: 0; }
+.fo-k { font-size: 12px; color: var(--muted); white-space: nowrap; }
 .fo-k b { color: var(--text); font-variant-numeric: tabular-nums; }
-.fo-time { font-size: 12px; margin-left: auto; }
-.fo-frame {
-  width: 100%; height: calc(100vh - 170px); min-height: 460px;
-  border: 1px solid var(--border); border-radius: 8px; background: #0f1420;
-  display: block;
+.fo-time { font-size: 11.5px; margin-left: auto; white-space: nowrap; }
+
+/* ---------- 模型路由：成员管理（通道号 + 昵称，单行紧凑，窄栏也能用） ---------- */
+/* 派发情况（2026-09-13 从「通道设置」拆成独立卡片、按"布局难看"重排，标题由「运营数据」改名并去掉括号说明）：
+   上排 4 个指标块（累计派发 / 失败 / 成功率 / 最近命中），下排各通道命中条 + 占比条。
+   窄栏自动 2 列、宽栏最多 4 列；内容块限宽 560px，宽屏下不会拉成一条空旷的长条。 */
+.rt-stats { display: flex; flex-direction: column; gap: 12px; }
+.rt-kpis {
+  display: grid; grid-template-columns: repeat(auto-fit, minmax(112px, 1fr));
+  gap: 8px; max-width: 560px;
 }
+.rt-kpi {
+  display: flex; flex-direction: column; gap: 1px; min-width: 0;
+  padding: 8px 10px; background: var(--card2);
+  border: 1px solid var(--border); border-radius: 8px;
+}
+.rt-kpi .k { font-size: 11px; color: var(--muted); line-height: 1.25; }
+.rt-kpi b {
+  font-size: 18px; font-weight: 700; line-height: 1.2; color: var(--text);
+  font-variant-numeric: tabular-nums;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.rt-kpi b.sm { font-size: 13.5px; }
+.rt-kpi b.muted { color: var(--muted); font-weight: 600; }
+.rt-kpi .t { font-size: 11px; color: var(--muted); font-variant-numeric: tabular-nums; }
+.rt-kpi.ok b { color: var(--green); }
+.rt-kpi.warn b { color: var(--yellow); }
+.rt-kpi.bad b { color: var(--red); }
+
+.rt-hits-title { font-size: 11px; color: var(--muted); margin-bottom: -5px; }
+.rt-hits { display: flex; flex-direction: column; gap: 5px; max-width: 560px; }
+.rt-hit { display: flex; align-items: center; gap: 7px; font-size: 12px; min-width: 0; }
+.rt-hit .no {
+  flex: 0 0 auto; width: 17px; height: 17px; border-radius: 50%;
+  display: grid; place-items: center;
+  background: rgba(79,140,255,.16); color: var(--accent);
+  font-size: 10.5px; font-weight: 700; font-variant-numeric: tabular-nums;
+}
+/* 昵称区固定占 40%（最多 190px）：每行占比条的起点和长度就一致，条长才可比；
+   超长昵称由省略号收尾。 */
+.rt-hit .nm {
+  flex: 0 0 40%; max-width: 190px; min-width: 0;
+  color: var(--text); font-weight: 600;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.rt-hit .bar {
+  flex: 1 1 28px; min-width: 18px; height: 5px; border-radius: 3px;
+  background: rgba(255,255,255,.07); overflow: hidden;
+}
+.rt-hit .bar i { display: block; height: 100%; background: var(--accent); border-radius: 3px; }
+/* 数字列固定 36px 右对齐：位数不同（0 / 118）也不会挤压占比条，各行条长才完全一致 */
+.rt-hit b {
+  flex: 0 0 36px; text-align: right; color: var(--text);
+  font-variant-numeric: tabular-nums;
+}
+.rt-hit.zero .no { background: rgba(255,255,255,.06); color: var(--muted); }
+.rt-hit.zero .bar i { background: transparent; }
+.rt-hit.zero b { color: var(--muted); }
+.rt-empty { font-size: 12.5px; color: var(--muted); padding: 2px 0; }
+.rt-empty.warn { color: var(--yellow); }
+.rt-link { font-size: 12px; color: var(--accent); text-decoration: none; white-space: nowrap; }
+.rt-link:hover { text-decoration: underline; }
+.rt-reg { font-size: 12px; line-height: 1.5; margin: 0 0 8px; }
+.rt-reg b { color: var(--text); }
+.rt-list { display: flex; flex-direction: column; gap: 4px; }
+.rt-row {
+  display: flex; align-items: center; gap: 6px; flex-wrap: wrap;
+  padding: 5px 7px;
+  background: var(--card2); border: 1px solid var(--border); border-radius: 8px;
+}
+.rt-row.off { opacity: .55; }
+.rt-row.off .rt-nick { text-decoration: line-through; }
+/* 通道号 = 派发顺序（也是「展开详情」的开关） */
+.rt-no {
+  flex: 0 0 auto; width: 21px; height: 21px; padding: 0; border-radius: 50%;
+  border: 1px solid transparent; cursor: pointer;
+  background: rgba(79,140,255,.16); color: var(--accent);
+  font-size: 12px; font-weight: 700; font-variant-numeric: tabular-nums;
+}
+.rt-no:hover { border-color: var(--accent); }
+.rt-row.open .rt-no { background: var(--accent); color: #fff; }
+/* 昵称：平时看着像文字，点进去才像输入框 */
+.rt-nick {
+  flex: 1 1 60px; min-width: 0;
+  background: transparent; border: 1px solid transparent; border-radius: 6px;
+  color: var(--text); font-size: 13.5px; font-weight: 600;
+  padding: 2px 5px; text-overflow: ellipsis;
+}
+.rt-nick:hover { border-color: var(--border); }
+.rt-nick:focus { outline: none; border-color: var(--accent); background: var(--bg); }
+.rt-nick::placeholder { color: var(--muted); font-weight: 400; }
+.rt-dot {
+  flex: 0 0 auto; width: 8px; height: 8px; border-radius: 50%;
+  background: var(--muted); cursor: help;
+}
+.rt-dot.on { background: var(--green); box-shadow: 0 0 7px var(--green); }
+.rt-dot.err { background: var(--red); }
+.rt-acts { flex: 0 0 auto; display: flex; align-items: center; gap: 2px; }
+.rt-acts button {
+  width: 21px; height: 21px; padding: 0; border-radius: 6px; cursor: pointer;
+  background: transparent; border: 1px solid transparent; color: var(--muted);
+  font-size: 12px; line-height: 1;
+}
+.rt-acts button:hover:not(:disabled) { border-color: var(--border); color: var(--text); }
+.rt-acts button:disabled { opacity: .3; cursor: default; }
+.rt-acts button.del:hover { color: var(--red); border-color: var(--red); }
+.rt-sw { display: inline-flex; cursor: pointer; }
+.rt-sw input { display: none; }
+.rt-sw i {
+  width: 26px; height: 15px; border-radius: 8px; background: var(--border);
+  position: relative; transition: background .15s;
+}
+.rt-sw i::after {
+  content: ""; position: absolute; top: 2px; left: 2px; width: 11px; height: 11px;
+  border-radius: 50%; background: #fff; transition: left .15s;
+}
+.rt-sw input:checked + i { background: var(--green); }
+.rt-sw input:checked + i::after { left: 13px; }
+/* 展开后的详情：模型 / 端点 / 凭据 / 能力 / 计数 */
+.rt-detail {
+  flex: 1 1 100%; margin: 4px 0 1px;
+  padding: 6px 8px 5px; border-top: 1px dashed var(--border);
+  font-size: 11.5px; color: var(--muted); line-height: 1.7;
+  word-break: break-all;
+}
+.rt-detail code { color: var(--text); font-size: 11.5px; }
+.rt-detail .warn { color: var(--yellow); }
+.rt-add { display: flex; gap: 6px; align-items: center; margin-top: 9px; flex-wrap: wrap; }
+.rt-add .ctl { flex: 1 1 150px; min-width: 0; }
+.rt-foot { margin-top: 7px; font-size: 12px; }
+.rt-foot .link {
+  background: none; border: 0; padding: 0; cursor: pointer;
+  color: var(--muted); font-size: 12px;
+}
+.rt-foot .link:hover { color: var(--accent); text-decoration: underline; }
+.rt-foot .link.primary { color: var(--accent); }
+.rt-sep { color: var(--border); margin: 0 5px; }
 
 /* ---------- 响应式（手机） ---------- */
 @media (max-width: 860px) {
@@ -517,7 +670,6 @@ input[type="range"].seek::-moz-range-thumb { width: 13px; height: 13px; border-r
   .brand .sub { display: none; }
   .tabs { gap: 1px; flex: 1; min-width: 0; }
   .tab { padding: 4px 6px; font-size: 11.5px; white-space: nowrap; }
-  .top-status { font-size: 10.5px; white-space: nowrap; flex-shrink: 0; margin-left: auto; }
 
   /* 仪表盘：两组卡片纵向均分、列表自适应填满，减少底部空白 */
   /* 高度账（避免右侧出现页面滚动条）：视口 = 顶栏(≈46) + main 上下外边距(8) + main 高度
@@ -533,15 +685,17 @@ input[type="range"].seek::-moz-range-thumb { width: 13px; height: 13px; border-r
     display: flex; flex-direction: column;
   }
   /* 纵向配比（2026-09-12 用户要求）：指令卡按内容固定高度（历史只保留 2 条），
-     把余下空间尽量给会议录音卡；容灾卡保持很小。列表不再各自滚动（外层无滚动条）。 */
+     把余下空间尽量给会议录音卡；模型路由卡保持很小。列表不再各自滚动（外层无滚动条）。 */
   #cmdCard { flex: 0 0 auto; }                       /* 按内容定高：标题+输入+目标+2 条历史 */
   #meetingCard { flex: 1 1 0; min-height: 0; }       /* 吃掉剩余空间 */
-  /* 底部一行：容器按内容定高；容灾卡在行内吃掉除箭头外的宽度（28 箭头 + 6 间距） */
+  /* 底部一行：容器按内容定高；模型路由卡在行内吃掉除箭头外的宽度（28 箭头 + 6 间距） */
   #foWrap { flex: 0 0 auto; margin-bottom: 0; }
   #failoverCard { flex: 1 1 auto; min-width: 0; }
-  #failoverCard .failover-row { gap: 4px 10px; }
-  #failoverCard .fo-right { gap: 4px 10px; flex-wrap: nowrap; overflow: hidden; }
-  #failoverCard .fo-k { font-size: 12px; white-space: nowrap; }
+  #failoverCard .failover-row { gap: 1px; }
+  /* 计数行允许换行，别用 overflow:hidden 把「通道2/失败/共」裁掉看不见 */
+  #failoverCard .fo-right { gap: 2px 9px; }
+  #failoverCard .fo-k { font-size: 11.5px; white-space: nowrap; }
+  #failoverCard .card-title .badge { font-size: 11.5px; padding: 1px 8px; }
   #failoverCard .fo-time { font-size: 11px; }
   .dashboard-grid .card-title,
   .dashboard-grid .card-body,
@@ -550,4 +704,10 @@ input[type="range"].seek::-moz-range-thumb { width: 13px; height: 13px; border-r
   .dashboard-grid .cmd-list { flex: 0 0 auto; max-height: 164px; overflow: hidden; }
   /* 会议列表：占满会议卡剩余高度，内部滚动（会话条目比指令条目矮） */
   .dashboard-grid .meeting-list { flex: 1 1 0; min-height: 0; max-height: none; overflow-y: auto; }
+
+  /* 模型路由成员行：本来就是单行 flex + 自动换行，窄边条里只需让控件别被压扁 */
+  .rt-row { row-gap: 3px; }
+  .rt-nick { flex: 1 1 70px; }
+  .rt-add .ctl { flex: 1 1 100%; }
+  .rt-add .btn { flex: 1 1 auto; }
 }

@@ -77,6 +77,7 @@ function switchView(name) {
   if (name === "history") loadHistory();
   if (name === "meetings") { loadMeetings(); refreshMeetingHeader(); }
   if (name === "boot") { loadBoot(); loadBootLogs(); loadGuardLogs(); }
+  if (name === "failover") loadRouter();
 }
 $$(".tab").forEach((t) => t.addEventListener("click", () => switchView(t.dataset.view)));
 
@@ -115,53 +116,405 @@ function renderCaptureBtn(phase) {
   btn.disabled = !!phase;
 }
 
-/* ================= 模型容灾路由（仪表盘小卡片） ================= */
-const FO_ROUTE_TEXT = {
-  internal: "内网 ✅", public: "公网（回退）", failed: "失败", idle: "等待请求"
-};
-const FO_ROUTE_CLS = {
-  internal: ["online", "--green"], public: ["idle", "--yellow"],
-  failed: ["error", "--red"], idle: ["idle", "--muted"]
-};
+/* ================= 模型路由（仪表盘小卡片） ================= */
+/** 健康表 → 一眼能读懂的组状态：当前请求会走哪个通道（通道1/通道2…）/ 全挂 / 未运行。
+ *  通道号就是 member.priority。 */
+function routerVerdict(d) {
+  const nm = (m, i) => `通道${m.priority || i + 1} ${m.name}`;
+  const g = (d.groups || []).find((x) => x.id === "echo-auto") || (d.groups || [])[0];
+  if (!d.proxy_online) return { kind: "offline", text: "路由未运行", cls: "error", color: "--red",
+                                tip: "模型路由进程没在跑：ECHO AUTO 会直接失败（重启 ECHO 可自动拉起）" };
+  if (!g || !(g.members || []).some((m) => m.enabled !== false)) {
+    return { kind: "idle", text: "无可用通道", cls: "idle", color: "--muted", tip: "模型组里没有启用的通道" };
+  }
+  const act = g.members.filter((m) => m.enabled !== false);
+  const up = (m) => m.reachable !== false && m.state !== "open";
+  const first = act[0];
+  const alive = act.filter(up);
+  if (up(first)) {
+    return { kind: "first", text: nm(first, 0), cls: "online", color: "--green",
+             tip: `${act.length} 个通道里，请求走 ${nm(first, 0)}` +
+                  (alive.length > 1 ? `（后面还有 ${alive.length - 1} 个可用）` : "") };
+  }
+  if (alive.length) {
+    const k = act.indexOf(alive[0]);
+    return { kind: "fallback", text: nm(alive[0], k), cls: "idle", color: "--yellow",
+             tip: `${nm(first, 0)} 当前不可用（${first.last_error || first.detail}），请求改走 ${nm(alive[0], k)}` };
+  }
+  return { kind: "down", text: "无可用通道", cls: "error", color: "--red",
+           tip: act.map((m, i) => `${nm(m, i)}：${m.last_error || m.detail}`).join("；") };
+}
+
+/** 卡片第二行：只留每个通道各自的命中次数，末尾靠右补上次派发时刻。
+ *  「失败/共」这类运营汇总不放在仪表盘，挪到模型路由页的「派发情况」卡片（#rtStats）。 */
+function routerCounts(d) {
+  const g = (d.groups || []).find((x) => x.id === "echo-auto") || (d.groups || [])[0] || {};
+  const mem = (g.members || []).filter((m) => m.enabled !== false);
+  const rt = d.routes || {};
+  const out = mem.map((m, i) => `<span class="fo-k">通道${m.priority || i + 1} <b>${m.ok || 0}</b></span>`);
+  out.push(`<span class="muted fo-time">${rt.last_route_at || "尚无请求"}</span>`);
+  return out.join("");
+}
 
 async function refreshFailoverCard() {
   const card = $("#failoverCard");
   if (!card) return;
   try {
     const d = await api("/api/failover/health");
-    const rt = d.routes || {};
-    const last = rt.last_route || "idle";
-    const [badgeCls, colorVar] = FO_ROUTE_CLS[last] || FO_ROUTE_CLS.idle;
-    const badge = $("#foBadge");
-    badge.textContent = last === "idle" ? "尚无请求" : (FO_ROUTE_TEXT[last] || last);
-    badge.className = "badge " + badgeCls;
-    $("#foStateText").textContent = FO_ROUTE_TEXT[last] || "—";
-    $("#foStateText").style.color = `var(${colorVar})`;
-    const dot = $("#foDot");
-    dot.style.background = `var(${colorVar})`;
-    dot.style.boxShadow = last === "idle" ? "none" : `0 0 8px var(${colorVar})`;
-    $("#foInt").textContent = rt.internal || 0;
-    $("#foPub").textContent = rt.public || 0;
-    $("#foFail").textContent = rt.failed || 0;
-    $("#foReq").textContent = rt.requests || 0;
-    $("#foTime").textContent = d.proxy_online
-      ? (rt.last_route_at ? `最近判定 ${rt.last_route_at}` : "自本次启动尚无请求")
-      : "容灾代理未运行（请求将直连内网，无回退）";
+    const v = routerVerdict(d);
+    // 状态做成会议录音那种椭圆徽章：文字+描边同色，一眼看出通道通不通
+    const st = $("#foStateText");
+    st.className = `badge ${v.cls}`;
+    st.textContent = v.text;
+    card.title = v.tip + "\n（点一下进模型路由页）";
+    const c = $("#foCounts");
+    if (c) c.innerHTML = routerCounts(d);
   } catch (e) {
-    const badge = $("#foBadge");
-    badge.textContent = "代理离线";
-    badge.className = "badge error";
-    $("#foStateText").textContent = "不可达";
-    $("#foStateText").style.color = "var(--red)";
-    $("#foDot").style.background = "var(--red)";
-    $("#foTime").textContent = "无法连接容灾代理：" + e.message;
+    const st = $("#foStateText");
+    st.className = "badge error";
+    st.textContent = "ECHO 离线";
+    const c = $("#foCounts");
+    if (c) c.innerHTML = `<span class="muted fo-time">读不到路由状态：${esc(e.message)}</span>`;
   }
 }
 
 function gotoFailover() {
   switchView("failover");
-  const frame = $("#foFrame");
-  if (frame && !frame.src) frame.src = "http://127.0.0.1:8899/";
+}
+
+/* ================= 模型路由（管理页：成员/优先级/启停/注册） ================= */
+let _rtMembers = [];        // 本地编辑副本（保存前的改动都在这里）
+let _rtMeta = {};           // 组元信息
+let _rtCands = [];          // 候选模型（来自 DSH 配置）
+let _rtView = {};           // 最近一次 /api/router/status 的原始返回
+let _rtDirty = false;
+let _rtOpen = new Set();    // 展开了详情的行（按通道号）
+
+const RT_STATE = {
+  closed: { cls: "on", text: "可用" },
+  open: { cls: "err", text: "熔断中" },
+  down: { cls: "err", text: "不可达" },
+  unknown: { cls: "", text: "未探测" },
+};
+
+/** 成员的健康 → 一个小圆点（颜色）+ 一句话（悬停可见） */
+function _rtMarkDirty() {
+  _rtDirty = true;
+  const btn = $("#rtSave");
+  if (btn) { btn.classList.add("primary"); btn.textContent = "保存 *"; }
+}
+
+function _rtHealth(m) {
+  const h = m.health || {};
+  const st = h.state === "open" ? RT_STATE.open
+    : (h.reachable === false ? RT_STATE.down
+      : (h.reachable === true ? RT_STATE.closed : RT_STATE.unknown));
+  const why = h.state === "open" ? (h.detail || "连续失败，暂时跳过")
+    : (h.reachable === false ? (h.last_error || h.detail || "连不上")
+      : (h.detail || "正常"));
+  const bits = [st.text, why];
+  if (h.last_ttfb_ms != null) bits.push(`首字节 ${h.last_ttfb_ms}ms`);
+  bits.push(`成功 ${h.ok || 0} / 失败 ${h.fail || 0}`);
+  if (!m.has_key) bits.push("⚠ DSH 凭据库里没有这个引用，调用会失败");
+  return { cls: st.cls, text: st.text, tip: bits.join(" · ") };
+}
+
+/** 单行：通道号（可点开详情）· 昵称 · 健康点 · 上移/下移/启停/移除 */
+function _rtRow(m, i, n) {
+  const h = _rtHealth(m);
+  const open = _rtOpen.has(i);
+  const nick = m.name || "";
+  const info = [
+    `模型 <code>${esc(m.model)}</code>`,
+    `端点 <code>${esc(m.base_url)}</code>`,
+    m.credential ? `凭据 <code>${esc(m.credential)}</code>${m.has_key ? "" : ` <span class="warn">（缺失）</span>`}` : "",
+    (m.context_window || m.max_tokens)
+      ? `能力 声明 ${Math.round((m.context_window || 0) / 1000)}K 上下文 / ${Math.round((m.max_tokens || 0) / 1000)}K 输出` : "",
+    h.tip,
+  ].filter(Boolean).join("<br>");
+  return `<div class="rt-row${m.enabled ? "" : " off"}${open ? " open" : ""}" data-i="${i}">
+    <button class="rt-no" data-act="toggle" title="通道 ${i + 1}（派发顺序）· 点开看详情">${i + 1}</button>
+    <input class="rt-nick" value="${esc(nick)}" placeholder="给这条通道起个短名，如 大ep / 外4.1F" maxlength="24"
+           title="通道昵称：DSH 里看不到，只在 ECHO 面板与路由日志里用">
+    <span class="rt-dot ${h.cls}" title="${esc(m.enabled ? h.tip : "已停用")}"></span>
+    <span class="rt-acts">
+      <button data-act="up" ${i === 0 ? "disabled" : ""} title="上移（提高优先级）">↑</button>
+      <button data-act="down" ${i === n - 1 ? "disabled" : ""} title="下移（降低优先级）">↓</button>
+      <label class="rt-sw" title="${m.enabled ? "停用（保留配置与统计，不参与派发）" : "启用"}">
+        <input type="checkbox" class="rt-en" ${m.enabled ? "checked" : ""}><i></i>
+      </label>
+      <button data-act="del" class="del" title="从模型组移除">✕</button>
+    </span>
+    <div class="rt-detail${open ? "" : " hidden"}">${open ? info : ""}</div>
+  </div>`;
+}
+
+function renderRouterMembers() {
+  const box = $("#rtMembers");
+  if (!box) return;
+  box.innerHTML = _rtMembers.length
+    ? _rtMembers.map((m, i) => _rtRow(m, i, _rtMembers.length)).join("")
+    : `<div class="empty">还没有成员：从下面选一个 DSH 里的模型加进来</div>`;
+}
+
+function renderRouterCandidates() {
+  const sel = $("#rtCandSelect");
+  if (!sel) return;
+  const used = new Set(_rtMembers.map((m) => m.candidate_key).filter(Boolean));
+  const opts = ['<option value="">从 DSH 的模型里选一个…</option>'];
+  _rtCands.forEach((c, i) => {
+    const dup = used.has(c.key) ? "（已加入）" : "";
+    const noBase = c.base_url ? "" : "（无端点）";
+    const noKey = c.has_key ? "" : " · 缺凭据";
+    opts.push(`<option value="${i}" ${c.base_url ? "" : "disabled"}>` +
+      `${esc(c.model_name)} · ${esc(c.provider_display)}${dup}${noBase}${noKey}</option>`);
+  });
+  sel.innerHTML = opts.join("");
+}
+
+function renderRouterHead() {
+  const v = _rtView || {};
+  const reg = v.registration || {};
+  const r = v.router || {};
+  const badge = $("#rtBadge");
+  const verdict = routerVerdict({
+    proxy_online: r.online,
+    groups: _rtMembers.length ? [{
+      id: "echo-auto",
+      members: _rtMembers.map((m, i) => ({
+        priority: m.priority || i + 1,
+        name: m.name || "未命名", enabled: m.enabled,
+        reachable: (m.health || {}).reachable, state: (m.health || {}).state,
+        detail: (m.health || {}).detail, last_error: (m.health || {}).last_error,
+      })),
+    }] : [],
+  });
+  badge.textContent = r.online ? verdict.text : "路由未运行";
+  badge.className = "badge " + (r.online ? verdict.cls : "error");
+  badge.title = verdict.tip;
+  const g = v.group || {};
+  const enabled = _rtMembers.filter((m) => m.enabled).length;
+  // 一行说清「DSH 那边是什么、注册没注册」——成员细节在各行详情里，不在这里堆
+  $("#rtReg").innerHTML =
+    `DSH 模型 <b>${esc(g.id || "echo-auto")}</b>` +
+    `（显示名 ${esc(g.display_name || "ECHO AUTO")}）· ` +
+    `${enabled}/${_rtMembers.length} 启用 · ` +
+    `${Math.round((g.context_window || 0) / 1000)}K 上下文 / ${Math.round((g.max_tokens || 0) / 1000)}K 输出 · ` +
+    (reg.registered ? `<b>已注册</b>` : `<b style="color:var(--yellow)">未注册</b>`) +
+    (r.online ? "" : ` · <span style="color:var(--red)">路由进程未运行：${esc(r.error || "")}</span>`);
+  const rb = $("#rtRegister");
+  rb.textContent = reg.registered ? "重新注册到 DSH" : "注册到 DSH";
+  rb.classList.toggle("primary", !reg.registered);
+  const sb = $("#rtSave");
+  if (sb && !_rtDirty) sb.textContent = "保存";
+  renderRouterStats();
+}
+
+/** 「派发情况」卡片（模型路由页第二张卡，在通道设置下面，标题无括号说明；2026-09-13 由「运营数据」改名）：
+ *  上排 4 个指标块（累计派发 / 失败 / 成功率 / 最近命中），下排各通道命中条 + 占比条。
+ *  仪表盘卡片上只放各通道命中次数，这些汇总只在这里显示。 */
+function renderRouterStats() {
+  const box = $("#rtStats");
+  if (!box) return;
+  const r = (_rtView || {}).router || {};
+  const rt = r.routes || {};
+  if (!r.online) {
+    box.innerHTML = `<div class="rt-empty warn">路由进程没在运行，暂时读不到派发数据` +
+                    (r.error ? `（${esc(r.error)}）` : "") + `</div>`;
+    return;
+  }
+  const req = rt.requests || 0;
+  const fail = rt.failed || 0;
+  const ok = Math.max(0, req - fail);
+  const rateNum = req ? ok / req : 0;
+  const pct = Math.round(rateNum * 1000) / 10;   // 一位小数，顺手抹掉浮点噪声（95.00000000000001）
+  const rate = req ? `${pct % 1 === 0 ? pct.toFixed(0) : pct.toFixed(1)}%` : "—";
+  const rateCls = !req ? "" : (fail === 0 ? " ok" : (rateNum >= 0.95 ? "" : " warn"));
+  const when = rt.last_route_at ? `<span class="t">${esc(rt.last_route_at)}</span>` : "";
+  const last = rt.last_member
+    ? `<b class="sm" title="${esc(`通道${rt.last_channel} ${rt.last_member}`.trim())}">${esc(rt.last_member)}</b>` + when
+    : `<b class="sm muted">尚无请求</b>`;
+  const mem = _rtMembers.filter((m) => m.enabled);
+  const counts = mem.map((m) => (m.health || {}).ok || 0);
+  const top = Math.max(1, ...counts);
+  const rows = mem.map((m, i) => {
+    const n = counts[i];
+    return `<div class="rt-hit${n ? "" : " zero"}">` +
+      `<span class="no">${m.priority != null ? m.priority : i + 1}</span>` +
+      `<span class="nm" title="${esc(m.name || "")}">${esc(m.name || "未命名")}</span>` +
+      `<span class="bar"><i style="width:${Math.round((n / top) * 100)}%"></i></span>` +
+      `<b>${n}</b></div>`;
+  }).join("");
+  box.innerHTML =
+    `<div class="rt-kpis">` +
+      `<div class="rt-kpi"><span class="k">累计派发</span><b>${req}</b></div>` +
+      `<div class="rt-kpi${fail ? " bad" : ""}"><span class="k">失败</span><b>${fail}</b></div>` +
+      `<div class="rt-kpi${rateCls}"><span class="k">成功率</span><b>${rate}</b></div>` +
+      `<div class="rt-kpi"><span class="k">最近命中</span>${last}</div>` +
+    `</div>` +
+    (rows ? `<div class="rt-hits-title">各通道命中</div><div class="rt-hits">${rows}</div>` : "");
+}
+
+/** 正在这一页上操作（改昵称、选下拉、点开关）时，别让 2 秒轮询把 DOM 换掉、抢走焦点 */
+function _rtBusy() {
+  const a = document.activeElement;
+  const sec = $("#view-failover");
+  return !!(a && sec && a !== document.body && sec.contains(a));
+}
+
+async function loadRouter() {
+  try {
+    const v = await api("/api/router/status");
+    _rtView = v;
+    _rtMeta = v.group || {};
+    _rtMembers = (v.members || []).map((m) => ({ ...m, name: m.name || "" }));
+    _rtCands = v.candidates || [];
+    _rtDirty = false;
+    _rtOpen.clear();
+    renderRouterHead();
+    renderRouterMembers();
+    renderRouterCandidates();
+  } catch (e) { toast("加载模型路由失败：" + e.message); }
+}
+
+async function saveRouter() {
+  const payload = _rtMembers.map((m, i) => ({
+    priority: i + 1,
+    name: (m.name || "").trim() || `通道${i + 1}`,
+    enabled: !!m.enabled,
+    candidate_key: m.candidate_key || "",
+    base_url: m.base_url,
+    model: m.model,
+    credential: m.credential,
+    headers: m.headers || {},
+    body_mode: m.body_mode,
+    context_window: m.context_window,
+    max_tokens: m.max_tokens,
+  }));
+  try {
+    const r = await api("/api/router/members", { method: "PUT", body: JSON.stringify({ members: payload }) });
+    toast(r.message || "已保存", 4200);
+    _rtDirty = false;
+    const sb = $("#rtSave");
+    if (sb) { sb.classList.remove("primary"); sb.textContent = "保存"; }
+    await loadRouter();
+  } catch (e) { toast("保存失败：" + e.message, 5000); }
+}
+
+/** 候选 → 一个短昵称建议（用户随手就能改） */
+function _rtSuggest(c) {
+  const p = c.provider_display || "";
+  const prefix = /官方/.test(p) ? "外" : (/联通|内网/.test(p) ? "内" : "");
+  let s = String(c.model_name || c.model || "").replace(/^BJ-Dp4-/, "").replace(/^DeepSeek-/, "");
+  if (/^V?4\.?1/i.test(s)) s = "4.1" + s.replace(/^V?4\.?1/i, "");
+  return (prefix + s).slice(0, 14);
+}
+
+function initRouterUI() {
+  const box = $("#rtMembers");
+  if (!box) return;
+
+  box.addEventListener("click", (e) => {
+    const btn = e.target.closest("button[data-act]");
+    if (!btn) return;
+    const i = Number(btn.closest(".rt-row").dataset.i);
+    const act = btn.dataset.act;
+    if (act === "toggle") {
+      if (_rtOpen.has(i)) _rtOpen.delete(i); else _rtOpen.add(i);
+      renderRouterMembers();
+      return;
+    }
+    if (act === "del") {
+      const m = _rtMembers[i];
+      confirmDialog(`从模型组移除「${i + 1}-${m.name || "未命名"}」？`, { okText: "移除", danger: true }).then((yes) => {
+        if (!yes) return;
+        _rtMembers.splice(i, 1);
+        _rtOpen.clear();
+        _rtMarkDirty(); renderRouterMembers(); renderRouterHead();
+      });
+      return;
+    }
+    const j = act === "up" ? i - 1 : i + 1;
+    if (j < 0 || j >= _rtMembers.length) return;
+    [_rtMembers[i], _rtMembers[j]] = [_rtMembers[j], _rtMembers[i]];
+    _rtOpen.clear();
+    _rtMarkDirty(); renderRouterMembers();
+  });
+
+  // 昵称边打边存到本地副本（保存时才写文件）
+  box.addEventListener("input", (e) => {
+    if (!e.target.classList.contains("rt-nick")) return;
+    const i = Number(e.target.closest(".rt-row").dataset.i);
+    _rtMembers[i].name = e.target.value;
+    _rtMarkDirty();
+  });
+
+  box.addEventListener("change", (e) => {
+    if (!e.target.classList.contains("rt-en")) return;
+    const i = Number(e.target.closest(".rt-row").dataset.i);
+    _rtMembers[i].enabled = e.target.checked;
+    _rtMarkDirty();
+    e.target.closest(".rt-row").classList.toggle("off", !e.target.checked);
+    renderRouterHead();
+  });
+
+  $("#rtAdd").addEventListener("click", () => {
+    const sel = $("#rtCandSelect");
+    if (sel.value === "") { toast("先选一个模型"); return; }
+    const c = _rtCands[Number(sel.value)];
+    if (!c || !c.base_url) { toast("这个候选没有可用端点"); return; }
+    _rtMembers.push({
+      priority: _rtMembers.length + 1,
+      name: _rtSuggest(c),
+      enabled: true,
+      candidate_key: c.key,
+      base_url: c.base_url,
+      model: c.model,
+      credential: c.credential,
+      headers: c.headers || {},
+      body_mode: c.body_mode,
+      context_window: c.context_window,
+      max_tokens: c.max_tokens,
+      has_key: c.has_key,
+      health: { state: "unknown", reachable: null, detail: "新增，待探测" },
+    });
+    _rtOpen.add(_rtMembers.length - 1);
+    _rtMarkDirty();
+    renderRouterMembers();
+    renderRouterCandidates();
+    renderRouterHead();
+    sel.value = "";
+    toast("已加入待保存列表：可改昵称、调顺序，然后点「保存」", 3600);
+  });
+
+  $("#rtSave").addEventListener("click", saveRouter);
+
+  $("#rtProbe").addEventListener("click", async () => {
+    const btn = $("#rtProbe");
+    btn.disabled = true;
+    try {
+      await post("/api/router/probe");
+      toast("已探测完成");
+      await loadRouter();
+    } catch (e) { toast("探测失败：" + e.message, 4500); }
+    finally { btn.disabled = false; }
+  });
+
+  $("#rtReload").addEventListener("click", async () => {
+    try {
+      const r = await post("/api/router/reload");
+      toast(r.message || "已重载");
+      await loadRouter();
+    } catch (e) { toast("重载失败：" + e.message, 4500); }
+  });
+
+  $("#rtRegister").addEventListener("click", async () => {
+    try {
+      const r = await post("/api/router/register");
+      toast(r.message || "已注册到 DSH", 4500);
+      await loadRouter();
+    } catch (e) { toast("注册失败：" + e.message, 5000); }
+  });
 }
 $("#failoverCard").addEventListener("click", (e) => {
   if (e.target.closest("a")) return;   // 让 "详情 ›" 链接走自己的 handler
@@ -171,9 +524,11 @@ $$("[data-goto-link='failover']").forEach((a) =>
   a.addEventListener("click", (e) => { e.preventDefault(); gotoFailover(); }));
 
 async function refreshDashboard() {
-  refreshFailoverCard();            // 模型容灾小卡片（独立容错，不阻塞主刷新）
+  refreshFailoverCard();            // 模型路由小卡片（独立容错，不阻塞主刷新）
   try {
     const st = await api("/api/status");
+    document.body.classList.remove("echo-offline");   // 顶栏去掉常驻状态后，靠这个红标表示"连不上"
+    renderLiveStatus(st);                             // 启动页"启动日志"标题右侧的在线时长 + 状态
     // 会议控制
     const mb = $("#meetingBadge");
     mb.textContent = st.meeting.active ? "录音中" : "空闲";
@@ -214,15 +569,13 @@ async function refreshDashboard() {
     // 近期会议（最近 5 条）
     const meets = await api("/api/meetings?limit=5");
     renderMeetingItems($("#recentMeetings"), meets.items);
-    $("#topStatus").textContent = `运行 ${fmtUptime(st.uptime)} · ${st.busy ? "命令处理中" : "空闲"}`;
   } catch (e) {
-    $("#topStatus").textContent = "连接失败：" + e.message;
+    // 顶栏不再有"运行时长 · 空闲"这类常驻状态；连不上时给整页加红色标记（正常时不可见），
+    // 同时模型路由卡自己会显示"ECHO 离线"
+    document.body.classList.add("echo-offline");
+    renderLiveStatus(null);
+    console.warn("ECHO 状态轮询失败：", e.message);
   }
-}
-
-function fmtUptime(s) {
-  const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60);
-  return h > 0 ? `${h}时${m}分` : `${m}分${s % 60}秒`;
 }
 
 // 会议时长 hh:mm 格式：满1小时显示 "H:MM"，不足1小时仅显分钟数（不含秒）
@@ -230,6 +583,44 @@ function fmtHM(sec) {
   const t = Math.max(0, Math.round(sec || 0));
   const h = Math.floor(t / 3600), m = Math.floor((t % 3600) / 60);
   return h > 0 ? `${h}:${String(m).padStart(2, "0")}` : String(m);
+}
+
+/* ---------------- 在线时长 + 当前状态（顶栏已取消，改放启动页与折叠条） ----------------
+   口径统一在这里：面板（启动日志标题右侧）用中文全称，折叠条用 compact 短格式（48 逻辑宽塞得下）。 */
+function fmtUptime(s, compact) {
+  const t = Math.max(0, Math.round(s || 0));
+  const h = Math.floor(t / 3600), m = Math.floor((t % 3600) / 60), ss = t % 60;
+  if (compact) {
+    if (h >= 100) return "99h+";
+    return h > 0 ? `${h}h${m}m` : (m > 0 ? `${m}m` : `${ss}s`);
+  }
+  return h > 0 ? `${h}时${m}分` : (m > 0 ? `${m}分${ss}秒` : `${ss}秒`);
+}
+
+/** 当前状态：录音中 > 命令处理中 > 空闲；读不到状态就是离线。cls 用面板既有徽章配色 */
+function liveState(st) {
+  if (!st) return { text: "ECHO 离线", cls: "error", tip: "读不到 /api/status：ECHO 服务可能正在重启" };
+  if (st.meeting && st.meeting.active) {
+    return { text: "录音中", cls: "active", tip: "正在会议录音" + (st.meeting.folder ? `：${st.meeting.folder}` : "") };
+  }
+  if (st.busy) {
+    return { text: "命令处理中", cls: "running", tip: "正在处理一条指令" + (st.busyPhase ? `（${st.busyPhase}）` : "") };
+  }
+  return { text: "空闲", cls: "idle", tip: "没有正在执行的任务" };
+}
+
+function renderLiveStatus(st) {
+  const el = $("#bootLive");
+  if (!el) return;
+  const v = liveState(st);
+  if (!st) {
+    el.innerHTML = `<span class="badge ${v.cls}">${v.text}</span>`;
+    el.title = v.tip;
+    return;
+  }
+  const up = fmtUptime(st.uptime);
+  el.innerHTML = `<span>已在线 <b>${up}</b></span><span class="badge ${v.cls}">${v.text}</span>`;
+  el.title = `ECHO 服务连续在线 ${up}，当前${v.text} · ${v.tip}`;
 }
 
 const STATUS_TEXT = { online: "在线", offline: "离线", active: "工作中", idle: "空闲",
@@ -365,10 +756,10 @@ $("#gotoMeetings").addEventListener("click", (e) => { e.preventDefault(); switch
 let _settingsCache = [];
 
 /* 分组展示顺序 = 业务相关性（与后端 grp 取值解耦，后端不因展示顺序而改动）：
-   通用(基础) → 语音命令(主用法) → 唤醒词 → 会议 → 纪要归档 → 面板(界面) → DSH(底层接入) */
-const SET_GROUP_ORDER = ["general", "voice", "wake", "meeting", "worklog", "panel", "dsh"];
+   通用(基础) → 语音命令(主用法) → 唤醒词 → 会议 → 纪要归档 → 模型路由 → 面板(界面) → DSH(底层接入) */
+const SET_GROUP_ORDER = ["general", "voice", "wake", "meeting", "worklog", "router", "panel", "dsh"];
 const SET_GROUP_NAMES = { general: "通用", voice: "语音命令", wake: "唤醒词",
-  meeting: "会议", worklog: "纪要归档", panel: "面板", dsh: "DSH 服务" };
+  meeting: "会议", worklog: "纪要归档", router: "模型路由", panel: "面板", dsh: "DSH 服务" };
 /* 默认展开；用户折叠过的分组记在 localStorage，刷新/重开面板后保持 */
 const SET_COLLAPSE_KEY = "echo.settings.collapsedGroups";
 
@@ -403,6 +794,7 @@ async function loadSettings() {
         <div class="set-group-body">${items.map((s) => renderSettingRow(s)).join("")}</div>
       </div>`;
     }).join("");
+    _syncSettingsCollapseAll();     // 重绘后让顶部双箭头跟着当前折叠状态
   } catch (e) { toast("加载设置失败：" + e.message); }
 }
 
@@ -426,7 +818,17 @@ $("#settingsForm").addEventListener("keydown", (e) => {
   const title = e.target.closest(".set-group-title");
   if (title) { e.preventDefault(); toggleSetGroup(title); }
 });
-/* 全部折叠 / 全部展开 */
+/* 全部折叠 / 全部展开（顶部双箭头图标按钮：方向表示点下去会发生什么，
+   悬停说明也跟着变；2026-09-13 用户要求把原来的"折叠/展开"文字按钮换成双箭头） */
+function _syncSettingsCollapseAll() {
+  const btn = $("#btnSettingsCollapseAll");
+  if (!btn) return;
+  const anyOpen = $$("#settingsForm .set-group").some((b) => !b.classList.contains("collapsed"));
+  btn.classList.toggle("unfold", !anyOpen);
+  const label = anyOpen ? "折叠全部分组" : "展开全部分组";
+  btn.title = label;
+  btn.setAttribute("aria-label", label);
+}
 $("#btnSettingsCollapseAll")?.addEventListener("click", () => {
   const boxes = $$("#settingsForm .set-group");
   const anyOpen = boxes.some((b) => !b.classList.contains("collapsed"));
@@ -437,6 +839,7 @@ $("#btnSettingsCollapseAll")?.addEventListener("click", () => {
     if (anyOpen) collapsed.add(b.dataset.grp); else collapsed.delete(b.dataset.grp);
   });
   _saveCollapsedGroups(collapsed);
+  _syncSettingsCollapseAll();
 });
 
 /* ---------------- 设置 → 服务：重启 ECHO ----------------
@@ -771,11 +1174,14 @@ function _settingValue(key) {
 
 async function loadBoot() {
   try {
-    const [bs, sr] = await Promise.all([api("/api/boot/status"), api("/api/settings")]);
+    const [bs, sr, st] = await Promise.all([
+      api("/api/boot/status"), api("/api/settings"), api("/api/status")]);
     _bootSettings = sr.settings;
     renderBoot(bs);
+    renderLiveStatus(st);            // 在线时长 + 状态（启动日志标题右侧）
   } catch (e) {
     $("#bootSummary").textContent = "加载失败：" + e.message;
+    renderLiveStatus(null);
   }
 }
 
@@ -877,11 +1283,13 @@ if ("serviceWorker" in navigator) {
     navigator.serviceWorker.register("/sw.js").catch(() => {});
   });
 }
+initRouterUI();
 switchView("dashboard");
 setInterval(() => {
   const v = $(".tab.active");
   if (v && v.dataset.view === "dashboard") refreshDashboard();
   else if (v && v.dataset.view === "boot") { loadBoot(); loadBootLogs(); loadGuardLogs(); }
+  else if (v && v.dataset.view === "failover" && !_rtDirty && !_rtBusy()) loadRouter();
 }, 2000);
 // 转写进度轮询（会议列表进度条）
 setInterval(pollTranscribe, 2000);

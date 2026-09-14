@@ -1,14 +1,14 @@
 # -*- coding: utf-8 -*-
-"""failover_proxy.py — DSH 容灾代理（dsh-failover/proxy.py）的 ECHO 侧守护
+"""failover_proxy.py — ECHO 模型路由（dsh-failover/proxy.py）的 ECHO 侧守护
 
-确保 http://127.0.0.1:8899（DSH 模型容灾代理）在运行：
+确保 http://127.0.0.1:8899（模型路由进程）在运行：
 
 - ECHO 每次启动（boot 组件）会调用 start_guard()：立即探测，不在则用同
   venv 的 pythonw 拉起；
-- 之后每 30 秒复查一次，代理中途退出会自动拉回。
+- 之后每 30 秒复查一次，路由中途退出会自动拉回。
 
 ECHO 本身由 DSH Desktop 的 echo-host 插件 15 秒守护，因此本守护随 ECHO
-一起借力：ECHO 活着 → 代理就绪。避免代理挂掉后 DSH 模型调用全部失败。
+一起借力：ECHO 活着 → 路由就绪。避免路由挂掉后 ECHO AUTO 模型调用全部失败。
 """
 import os
 import subprocess
@@ -32,7 +32,7 @@ LOG_DIR = os.path.join(BASE_DIR, "dsh-failover", "logs")
 
 
 def proxy_online(timeout=1.0):
-    """探测容灾代理 /health。在线返回 True。"""
+    """探测模型路由 /health。在线返回 True。"""
     try:
         with urllib.request.urlopen(HEALTH_URL, timeout=timeout) as resp:
             return resp.status == 200
@@ -52,12 +52,12 @@ def _pythonw():
 
 
 def ensure_running():
-    """探测代理，不在则拉起。幂等。返回 (ok, detail)。"""
+    """探测模型路由，不在则拉起。幂等。返回 (ok, detail)。"""
     if proxy_online():
-        return True, "代理已在运行"
+        return True, "模型路由已在运行"
     script = PROXY_SCRIPT
     if not os.path.isfile(script):
-        return False, "代理脚本缺失: %s" % script
+        return False, "模型路由脚本缺失: %s" % script
     if not os.path.isdir(LOG_DIR):
         try:
             os.makedirs(LOG_DIR)
@@ -76,15 +76,15 @@ def ensure_running():
                 creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
             )
     except Exception as e:
-        return False, "拉起代理失败: %s" % e
+        return False, "拉起模型路由失败: %s" % e
     # 等待就绪（最多 READY_WAIT_MAX 秒）
     waited = 0.0
     while waited < READY_WAIT_MAX:
         if proxy_online(0.8):
-            return True, "代理已拉起"
+            return True, "模型路由已拉起"
         time.sleep(0.5)
         waited += 0.5
-    return True, "代理进程已启动（健康检查暂未通过，守护线程会继续复查）"
+    return True, "模型路由进程已启动（健康检查暂未通过，守护线程会继续复查）"
 
 
 def _guard_loop():
@@ -97,7 +97,7 @@ def _guard_loop():
 
 
 def start_guard():
-    """启动守护线程（幂等），并立即确保代理在运行。返回 (ok, detail)。"""
+    """启动守护线程（幂等），并立即确保模型路由在运行。返回 (ok, detail)。"""
     global _guard, _stop_evt
     with _lock:
         if _guard is not None and _guard.is_alive():
@@ -110,7 +110,7 @@ def start_guard():
 
 
 def stop_guard():
-    """停止守护线程（不影响代理进程本身）。"""
+    """停止守护线程（不影响模型路由进程本身）。"""
     global _guard, _stop_evt
     with _lock:
         if _guard is not None:

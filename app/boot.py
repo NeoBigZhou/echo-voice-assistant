@@ -163,7 +163,7 @@ def _spawn(cids):
 
 def _run_boot():
     set_phase("booting")
-    # 阶段 1：轻量组件（秒级）并行 —— 容灾代理先确保起来，DSH 随时可能被调用
+    # 阶段 1：轻量组件（秒级）并行 —— 模型路由先确保起来，DSH 随时可能被调用
     _spawn(["failover", "dsh", "tts", "hotkey", "meeting", "diarize"])
     # 阶段 2：重组件（模型加载）并行 —— 命令转写常驻；会议转写按需不在此启动
     _spawn(["stt-cmd", "wake"])
@@ -214,14 +214,30 @@ def _start_dsh(report):
 
 
 def _start_failover(report):
-    """确保 DSH 模型容灾代理(8899) 在运行，并启动 30s 守护线程。"""
+    """确保 DSH 模型路由(8899) 在运行，启动 30s 守护线程，并把模型组注册进 DSH。"""
     from app import failover_proxy
     report(detail="探测 8899…", progress=0.2)
     ok, detail = failover_proxy.start_guard()
-    if ok:
-        report(status="online", detail=detail, progress=1.0)
-    else:
+    if not ok:
         report(status="failed", detail=detail, error=detail)
+        return
+    # 顺带把 ECHO 的模型组（config.json 的 groups）注册成 DSH 的本地模型；
+    # 注册失败不影响路由本身，只是 DSH 里选不到 ECHO AUTO。
+    from app.config import settings as _s
+    if not _s.get("routerAutoRegister", True):
+        report(status="online", detail=f"{detail} · 已按设置跳过 ECHO AUTO 注册", progress=1.0)
+        return
+    try:
+        from app import llm_router
+        report(detail="注册 ECHO AUTO…", progress=0.7)
+        rok, rdetail = llm_router.sync()
+        detail = f"{detail} · {rdetail}" if rok else f"{detail} · ECHO AUTO 未注册（{rdetail}）"
+        if not rok:
+            print(f"[boot] ECHO AUTO 注册失败: {rdetail}")
+    except Exception as exc:
+        detail = f"{detail} · ECHO AUTO 注册异常（{type(exc).__name__}: {exc}）"
+        print(f"[boot] ECHO AUTO 注册异常: {exc}")
+    report(status="online", detail=detail, progress=1.0)
 
 
 def _stt_engine_and_model(setting_key):
@@ -360,7 +376,7 @@ def setup():
              status="online")
     register("dsh", "DSH 执行引擎", "⚙️", start_fn=_start_dsh, can_start=True,
              can_stop=False)
-    register("failover", "模型容灾代理", "🛰️", start_fn=_start_failover,
+    register("failover", "模型路由（ECHO AUTO）", "🛰️", start_fn=_start_failover,
              can_start=True, can_stop=False)
     register("stt-cmd", "命令转写引擎（常驻）", "🎤", start_fn=_start_stt_cmd,
              stop_fn=_stop_stt_cmd, can_start=True, can_stop=True)

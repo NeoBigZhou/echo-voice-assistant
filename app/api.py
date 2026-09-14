@@ -167,33 +167,81 @@ def api_status(_auth=Depends(optional_auth)):
     }
 
 
-# ---------------------------------------------------------------- 模型容灾代理（只读转发）
-# 容灾代理地址（dsh-failover/proxy.py 默认端口）。代理未运行时不报错，返回 offline 结构。
+# ---------------------------------------------------------------- 模型路由（只读转发 + 组管理）
+# 路由进程地址（dsh-failover/proxy.py 默认端口）。未运行时不报错，返回 offline 结构。
 FAILOVER_HEALTH_URL = "http://127.0.0.1:8899/health"
 
 
 @router.get("/failover/health")
 def api_failover_health(_auth=Depends(optional_auth)):
-    """只读转发容灾代理 /health：返回路由统计（内网/公网/失败、最近一次、切换历史）。
+    """路由进程 /health 的只读转发（端点名沿用旧称，面板小卡片与折叠条在用）。"""
+    from app import router_admin
+    return router_admin.health()
 
-    面板仪表盘小卡片与该页签共用此端点（同源，避免跨端口 CORS）。
-    """
-    try:
-        import httpx
-        resp = httpx.get(FAILOVER_HEALTH_URL, timeout=3)
-        resp.raise_for_status()
-        data = resp.json()
-        data["proxy_online"] = True
-        return data
-    except Exception as exc:  # 代理未启动 / 端口不通 → 给前端一个稳定的 offline 结构
-        return {
-            "proxy_online": False,
-            "status": "offline",
-            "error": str(exc),
-            "routes": {"requests": 0, "internal": 0, "public": 0, "failed": 0,
-                       "last_route": None, "last_route_at": None},
-            "history": [],
-        }
+
+class RouterMembersIn(BaseModel):
+    members: list
+
+
+class RouterMetaIn(BaseModel):
+    display_name: str = ""
+
+
+@router.get("/router/status")
+def api_router_status(_auth=Depends(optional_auth)):
+    """模型路由总览：组成员（配置+健康）、DSH 注册态、可勾选候选模型。"""
+    from app import router_admin
+    return router_admin.members_view()
+
+
+@router.put("/router/members")
+def api_router_members(body: RouterMembersIn, _auth=Depends(optional_auth)):
+    """保存模型组成员（列表顺序即优先级）→ 热重载路由 → 同步注册进 DSH。"""
+    from app import router_admin
+    ok, detail = router_admin.save_members(body.members)
+    if not ok:
+        raise HTTPException(status_code=400, detail=detail)
+    return {"ok": True, "message": detail}
+
+
+@router.put("/router/meta")
+def api_router_meta(body: RouterMetaIn, _auth=Depends(optional_auth)):
+    """改模型组显示名（= DSH 里看到的模型名）。"""
+    from app import router_admin
+    ok, detail = router_admin.save_group_meta(display_name=body.display_name.strip() or None)
+    if not ok:
+        raise HTTPException(status_code=400, detail=detail)
+    return {"ok": True, "message": detail}
+
+
+@router.post("/router/probe")
+def api_router_probe(_auth=Depends(optional_auth)):
+    """立即探测所有成员（不等下一轮后台探测）。"""
+    from app import router_admin
+    ok, detail = router_admin.probe_now()
+    if not ok:
+        raise HTTPException(status_code=503, detail=f"路由未运行或探测失败：{detail}")
+    return {"ok": True, "groups": detail.get("groups", [])}
+
+
+@router.post("/router/reload")
+def api_router_reload(_auth=Depends(optional_auth)):
+    """让路由进程重读 config.json（改配置后不必重启）。"""
+    from app import router_admin
+    ok, detail = router_admin.reload_router()
+    if not ok:
+        raise HTTPException(status_code=503, detail=f"路由未运行或重载失败：{detail}")
+    return {"ok": True, "message": detail}
+
+
+@router.post("/router/register")
+def api_router_register(_auth=Depends(optional_auth)):
+    """手动把当前模型组注册进 DSH（等于 ECHO 启动时自动做的那一步）。"""
+    from app import router_admin
+    ok, detail = router_admin.register()
+    if not ok:
+        raise HTTPException(status_code=400, detail=detail)
+    return {"ok": True, "message": detail}
 
 
 @router.get("/settings")
@@ -209,6 +257,12 @@ def put_settings(body: SettingsIn, _auth=Depends(optional_auth)):
         runtime.stop_wake()
         if settings.get("wakeEnabled", False):
             runtime.start_wake()
+    if any(k.startswith("router") for k in updated):
+        # 路由相关项（探测间隔/组名/自动注册）落到 dsh-failover/config.json 并热重载
+        from app import router_admin
+        ok, detail = router_admin.apply_settings(updated)
+        if not ok:
+            raise HTTPException(status_code=400, detail=f"路由配置未能应用：{detail}")
     return {"ok": True, "updated": updated}
 
 
