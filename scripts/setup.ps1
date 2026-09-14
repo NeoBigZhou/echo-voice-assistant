@@ -17,13 +17,13 @@ if (-not (Test-Path $py)) {
 Write-Host "[1/4] venv OK: $py"
 
 # 2. 补装轻量依赖（fastapi/uvicorn/pydantic；重依赖已随 venv 就位）
-& $py -c "import fastapi, uvicorn, pydantic" 2>$null
+& $py -c "import fastapi, uvicorn, pydantic, multipart, httpx, yaml, ruamel.yaml, soxr" 2>$null
 if ($LASTEXITCODE -ne 0) {
-    Write-Host '[2/4] 安装 fastapi/uvicorn/pydantic ...'
-    & $py -m pip install --disable-pip-version-check -q fastapi "uvicorn[standard]" pydantic
+    Write-Host '[2/4] 安装 Web/API 依赖（fastapi/uvicorn/pydantic/multipart/httpx/yaml/ruamel/soxr）...'
+    & $py -m pip install --disable-pip-version-check -q fastapi "uvicorn[standard]" pydantic python-multipart httpx PyYAML ruamel.yaml soxr
     if ($LASTEXITCODE -ne 0) {
         Write-Host '[!] 安装失败，尝试清华镜像...' -ForegroundColor Yellow
-        & $py -m pip install --disable-pip-version-check -q -i https://pypi.tuna.tsinghua.edu.cn/simple fastapi "uvicorn[standard]" pydantic
+        & $py -m pip install --disable-pip-version-check -q -i https://pypi.tuna.tsinghua.edu.cn/simple fastapi "uvicorn[standard]" pydantic python-multipart httpx PyYAML ruamel.yaml soxr
     }
 } else {
     Write-Host '[2/4] Web 依赖已就位'
