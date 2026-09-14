@@ -65,7 +65,7 @@ Mac 上暂不支持耳机媒体键触发，请用组合键。
 ## 可选组件（按需再装）
 
 ```bash
-venv/bin/pip install funasr          # SenseVoice / Qwen3-ASR（中文短命令更快）
+venv/bin/pip install funasr modelscope  # SenseVoice / Qwen3-ASR（中文短命令更快）
 venv/bin/pip install pyannote.audio  # 会议说话人分离（会拉 torch，体积很大）
 ```
 
