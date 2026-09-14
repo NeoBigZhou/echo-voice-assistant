@@ -130,7 +130,7 @@ class GuardLogIn(BaseModel):
 
 # ---------------------------------------------------------------- 状态与配置
 @router.get("/status")
-def api_status():
+def api_status(_auth=Depends(optional_auth)):
     dsh_ok = manager.dsh_ready()
     services.report_dsh("online" if dsh_ok else "offline",
                         "API 可访问" if dsh_ok else "未运行")
