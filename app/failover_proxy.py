@@ -10,6 +10,7 @@
 ECHO 本身由 DSH Desktop 的 echo-host 插件 15 秒守护，因此本守护随 ECHO
 一起借力：ECHO 活着 → 路由就绪。避免路由挂掉后 ECHO AUTO 模型调用全部失败。
 """
+import json
 import os
 import subprocess
 import sys
@@ -17,8 +18,10 @@ import threading
 import time
 import urllib.request
 
-PROXY_PORT = 8899
-HEALTH_URL = "http://127.0.0.1:%d/health" % PROXY_PORT
+# 路由端口以 dsh-failover/config.json 的 "port" 为准（代理进程自己也是读它）。
+# 2026-09-14 起不再写死：Windows 动态端口段（默认 1024-15000）会被 Hyper-V/WSL
+# 划为保留段且每次重启漂移，落在其中的端口 bind 会失败（Errno 13）。
+PROXY_DEFAULT_PORT = 8899
 GUARD_INTERVAL = 30.0        # 守护复查间隔（秒）
 READY_WAIT_MAX = 6.0         # 拉起后等待健康检查的最长时间（秒）
 
@@ -28,13 +31,24 @@ _stop_evt = None
 
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 PROXY_SCRIPT = os.path.join(BASE_DIR, "dsh-failover", "proxy.py")
+PROXY_CONFIG = os.path.join(BASE_DIR, "dsh-failover", "config.json")
 LOG_DIR = os.path.join(BASE_DIR, "dsh-failover", "logs")
+
+
+def proxy_port():
+    """路由监听端口：优先取 config.json 的 port，取不到用默认值。"""
+    try:
+        with open(PROXY_CONFIG, "r", encoding="utf-8-sig") as f:
+            return int(json.load(f).get("port") or PROXY_DEFAULT_PORT)
+    except Exception:
+        return PROXY_DEFAULT_PORT
 
 
 def proxy_online(timeout=1.0):
     """探测模型路由 /health。在线返回 True。"""
+    url = "http://127.0.0.1:%d/health" % proxy_port()
     try:
-        with urllib.request.urlopen(HEALTH_URL, timeout=timeout) as resp:
+        with urllib.request.urlopen(url, timeout=timeout) as resp:
             return resp.status == 200
     except Exception:
         return False

@@ -1,7 +1,14 @@
 ﻿# status.ps1 — 查看 ECHO 模型路由状态与组成员健康（隐藏密钥）
 #   用法: powershell -ExecutionPolicy Bypass -File dsh-failover\status.ps1
 $ErrorActionPreference = 'SilentlyContinue'
-$probe = 8899
+# 端口以 config.json 的 "port" 为准（不再写死：Windows 动态端口段会被
+# Hyper-V/WSL 保留且重启漂移，落在其中的端口 bind 会失败）
+$cfgPath = Join-Path $PSScriptRoot 'config.json'
+$probe = 0
+if (Test-Path $cfgPath) {
+    try { $probe = [int]((Get-Content $cfgPath -Raw -Encoding UTF8 | ConvertFrom-Json).port) } catch { $probe = 0 }
+}
+if (-not $probe -or $probe -le 0) { $probe = 8899 }
 try {
     $h = Invoke-RestMethod -Uri "http://127.0.0.1:$probe/health" -TimeoutSec 3
     Write-Host "运行中: http://127.0.0.1:$probe/health" -ForegroundColor Green

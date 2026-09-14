@@ -150,6 +150,16 @@ def main():
         except Exception:
             pass
         sys.exit(0)
+    # 把实际监听端口写到 data\echo-port.txt：外部脚本（launch-desktop.ps1 等）
+    # 与 DSH 插件据此定位服务，从而不必把端口写死在多处。
+    # 为什么需要：Windows 动态端口段（默认 1024-15000）会被 Hyper-V/WSL 划为保留段
+    # 且每次重启漂移，落在其中的端口 bind 会失败（Errno 13），届时必须改 serverPort。
+    try:
+        port_file = os.path.join(db.DATA_DIR, "echo-port.txt")
+        with open(port_file, "w", encoding="ascii") as f:
+            f.write(str(port))
+    except Exception as e:
+        print(f"[warn] 写入 echo-port.txt 失败: {e}")
     print(f"ECHO 服务启动: http://127.0.0.1:{port}")
     uvicorn.run(app, host="127.0.0.1", port=port, log_level="info")
 

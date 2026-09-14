@@ -27,7 +27,8 @@ from app import llm_router
 
 CONFIG: Path = llm_router.ROUTER_CONFIG
 GROUP_ID: str = llm_router.ROUTE_ID
-BASE: str = llm_router.route_base_url()
+# 路由基址在调用时求值（端口以 dsh-failover/config.json 为准）。此前是模块级常量，
+# 导入时即固化，改端口必须重启 ECHO 才生效。
 HTTP_TIMEOUT = 8.0
 
 # dsh-llm-deepseek 的内置默认目录（settings.yaml 里没有 llm-deepseek 段时用它）
@@ -188,7 +189,7 @@ def candidates() -> list:
 # ---------------------------------------------------------------- 路由健康
 def _request(path: str, payload: dict = None, timeout: float = HTTP_TIMEOUT) -> tuple:
     """调路由（管理接口自动带路由令牌）。返回 (ok, data_or_err)。"""
-    url = BASE + path
+    url = llm_router.route_base_url() + path
     data = json.dumps(payload or {}).encode() if payload is not None else None
     req = urllib.request.Request(url, data=data, method="POST" if data is not None else "GET")
     req.add_header("Content-Type", "application/json")
@@ -286,6 +287,7 @@ def members_view() -> dict:
         },
         "members": rows,
         "router": {"online": bool(h.get("proxy_online")), "error": h.get("error", ""),
+                   "url": llm_router.route_base_url(),
                    "routes": h.get("routes") or {}},
         "registration": registration(),
         "candidates": cands,

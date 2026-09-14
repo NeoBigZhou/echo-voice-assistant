@@ -37,7 +37,25 @@ $py = Join-Path $root 'venv\Scripts\python.exe'
 # Prefer the ASCII junction (works around tools that cannot read non-ASCII paths).
 $pyAlt = $env:ECHO_PYTHON   # 可选：非 ASCII 路径下的解释器覆盖，见 docs/DEPLOY.md
 if ($pyAlt -and (Test-Path $pyAlt)) { $py = $pyAlt }
-$base = 'http://127.0.0.1:8970'
+
+# ECHO 面板端口：优先级 ECHO_PORT 环境变量 → data\echo-port.txt → 默认 8970。
+# 为什么需要：Windows 动态端口段（默认 1024-15000）会被 Hyper-V/WSL 划为保留段且
+# 每次重启漂移，落在其中的端口 bind 会失败（Errno 13），届时必须换端口——
+# 脚本若还盯着旧端口，双击快捷方式就会打开一个空页面。
+# echo-port.txt 由 ECHO 启动时写出（app/main.py），是端口的权威来源。
+function Resolve-EchoPort([string]$root) {
+    if ($env:ECHO_PORT) { try { if ([int]$env:ECHO_PORT -gt 0) { return [int]$env:ECHO_PORT } } catch { } }
+    $f = Join-Path $root 'data\echo-port.txt'
+    if (Test-Path $f) {
+        try {
+            $v = (Get-Content $f -Raw -ErrorAction Stop).Trim()
+            if ([int]$v -gt 0) { return [int]$v }
+        } catch { }
+    }
+    return 8970
+}
+$echoPort = Resolve-EchoPort $root
+$base = "http://127.0.0.1:$echoPort"
 $dshPort = 43120          # DSH Desktop 2.x: GUI + API on one port
 $logDir = Join-Path $root 'data\logs'
 $logFile = Join-Path $logDir 'launch.log'
@@ -84,7 +102,7 @@ function Test-TcpPort([int]$port) {
 }
 
 # ---------- 1. start ECHO in the background when it is not running ----------
-$alive = Test-TcpPort 8970
+$alive = Test-TcpPort $echoPort
 Log "ECHO listening before start: $alive"
 if (-not $alive) {
     if (-not (Test-Path $py)) {
@@ -107,7 +125,7 @@ if (-not $alive) {
     Log "ECHO started in background PID=$($p.Id); waiting for the port (pythonw has no window)"
     for ($i = 0; $i -lt 75; $i++) {
         Start-Sleep -Seconds 1
-        if (Test-TcpPort 8970) { $alive = $true; break }
+        if (Test-TcpPort $echoPort) { $alive = $true; break }
     }
 }
 if (-not $alive) {
@@ -128,7 +146,7 @@ if (-not $dshOk) {
 
 # ---------- 3. open the panel (a Chromium app window when available) ----------
 function Open-Panel {
-    $url = 'http://127.0.0.1:8970'
+    $url = "http://127.0.0.1:$echoPort"
     $pf86 = [Environment]::GetEnvironmentVariable('ProgramFiles(x86)')
     $cands = @()
     if ($pf86) { $cands += (Join-Path $pf86 'Microsoft\Edge\Application\msedge.exe') }
@@ -150,5 +168,5 @@ function Open-Panel {
 try {
     # Absorb the return value so it is not printed into the (hidden) console.
     $null = Open-Panel
-    Log "panel opened: http://127.0.0.1:8970"
+    Log "panel opened: http://127.0.0.1:$echoPort"
 } catch { Log "opening the panel failed: $_" }

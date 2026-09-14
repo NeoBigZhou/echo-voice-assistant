@@ -17,7 +17,7 @@ $lnk = $ws.CreateShortcut($lnkPath)
 $lnk.TargetPath = 'powershell.exe'
 $lnk.Arguments = "-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$root\scripts\start.ps1`" -Background"
 $lnk.WorkingDirectory = $root
-$lnk.Description = 'ECHO 个人助理（后台启动，面板 http://127.0.0.1:8970）'
+$lnk.Description = 'ECHO 个人助理（后台启动，自动打开面板）'
 $lnk.Save()
 Write-Host "已创建开机自启: $lnkPath"
 Write-Host '（如需桌面快捷方式，可手动把该文件复制到桌面）'

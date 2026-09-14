@@ -173,7 +173,7 @@ Write-Host '  2) 启动 ECHO（日常用桌面快捷方式）：'
 Write-Host "       cd $Root        # 必须先切到 ECHO 根目录，脚本不会自己切"
 Write-Host '       powershell -ExecutionPolicy Bypass -File scripts\start.ps1            # 前台调试'
 Write-Host '       powershell -ExecutionPolicy Bypass -File scripts\install-desktop-shortcut.ps1   # 桌面一键启动'
-Write-Host '  3) 打开面板 http://127.0.0.1:8970 ，在 设置 里把「会议纪要工作区」改成当前路径'
+Write-Host '  3) 打开面板（端口见 data\echo-port.txt），在 设置 里把「会议纪要工作区」改成当前路径'
 Write-Host '  4) 无 NVIDIA 显卡时：设置 → 通用 → 计算设备 改为 cpu'
 Write-Host ''
 Write-Host '提示：请用 python -m pip 安装依赖，不要用 venv\Scripts\pip.exe（其中写死了源机器路径）。'

@@ -184,9 +184,10 @@
   <div class="toast" id="toast"></div>
 
 <script>
-  // 本页由 ECHO\sidebar\echo-sidebar.exe（WinForms + WebView2）承载在 48px 折叠条里，
-  // 通过 file:// 加载，因此调用 ECHO 的 API 必须用绝对地址。
-  const API = "http://127.0.0.1:8970";
+  // 本页由 echo-sidebar.exe 承载，但经 http://127.0.0.1:<ECHO端口>/web/rail.html
+  // 同源加载（不再是 file://），所以 API 用相对路径即可——端口由 ECHO 决定，
+  // 页面无需知道端口号，换端口也不必改这里。
+  const API = "";
   const dot = document.getElementById("dot");
   const btnRec = document.getElementById("btnRec");
   const btnSay = document.getElementById("btnSay");

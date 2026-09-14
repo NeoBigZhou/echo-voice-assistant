@@ -371,6 +371,12 @@ async function loadRouter() {
     _rtCands = v.candidates || [];
     _rtDirty = false;
     _rtOpen.clear();
+    // 路由仪表盘链接的地址由后端给出（端口以 config.json 为准，不再写死）
+    const rurl = (v.router || {}).url;
+    if (rurl) {
+      const a = document.getElementById("rtDashLink");
+      if (a) a.href = rurl.replace(/\/+$/, "") + "/";
+    }
     renderRouterHead();
     renderRouterMembers();
     renderRouterCandidates();

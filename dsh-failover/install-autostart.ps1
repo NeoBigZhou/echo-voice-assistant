@@ -25,7 +25,7 @@ $lnk = $ws.CreateShortcut($lnkPath)
 $lnk.TargetPath = 'powershell.exe'
 $lnk.Arguments = "-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$dir\start.ps1`""
 $lnk.WorkingDirectory = $dir
-$lnk.Description = 'ECHO 模型路由（ECHO AUTO 模型组，按优先级派发；http://127.0.0.1:8899）'
+$lnk.Description = 'ECHO 模型路由（ECHO AUTO 模型组，按优先级派发）'
 $lnk.Save()
 Write-Host "已创建开机自启: $lnkPath"
 Write-Host '详情: powershell -ExecutionPolicy Bypass -File dsh-failover\status.ps1'

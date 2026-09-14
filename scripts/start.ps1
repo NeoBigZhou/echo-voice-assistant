@@ -65,7 +65,7 @@ function Start-EchoOnce([switch]$Quiet) {
     $p = Start-Process -FilePath $pyw -ArgumentList @('-m', 'app.main') `
         -WorkingDirectory $root -RedirectStandardOutput $outLog `
         -RedirectStandardError $errLog -PassThru
-    if (-not $Quiet) { Write-Host "ECHO started in background (PID $($p.Id))  panel: http://127.0.0.1:8970" }
+    if (-not $Quiet) { Write-Host "ECHO started in background (PID $($p.Id))  panel: 见 data\echo-port.txt" }
     return $p
 }
 

@@ -27,4 +27,4 @@ if (Test-Path $icon) { $lnk.IconLocation = "$icon,0" }
 else { $lnk.IconLocation = "$env:SystemRoot\System32\shell32.dll,220" }
 $lnk.Save()
 Write-Host "已创建桌面快捷方式: $lnkPath"
-Write-Host '双击即可启动 ECHO 并打开控制面板（http://127.0.0.1:8970）'
+Write-Host '双击即可启动 ECHO 并打开控制面板（端口以 data\echo-port.txt 为准）'

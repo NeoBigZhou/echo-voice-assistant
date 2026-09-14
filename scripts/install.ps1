@@ -470,7 +470,7 @@ function Step08-Finalize {
     Write-Host "      ECHO 目录 : $script:ExistingDir"
     if (-not $script:DryRun) {
         Write-Host "      启动 ECHO : powershell -NoProfile -ExecutionPolicy Bypass -File `"$script:ExistingDir\scripts\start.ps1`""
-        Write-Host '      打开面板 : http://127.0.0.1:8970'
+        Write-Host '      打开面板 : 见 data\echo-port.txt' 
         Write-Host '      建议立即设置：'
         Write-Host '        面板 → 设置 → 通用 → 计算设备：无 NVIDIA 显卡选 cpu'
         Write-Host '        面板 → 设置 → 会议 → 会议纪要工作区：可留空（默认 ECHO 根目录）'

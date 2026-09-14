@@ -15,10 +15,29 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
-BASE = "http://127.0.0.1:8899"
-ECHO_API = "http://127.0.0.1:8970/api"
 ROOT = Path(__file__).resolve().parent.parent
 CREDS = Path.home() / ".dsh" / ".credentials.yaml"
+
+
+def _router_port() -> int:
+    """路由端口以同目录 config.json 为准（不再写死）。"""
+    try:
+        cfg = json.loads((Path(__file__).resolve().parent / "config.json").read_text(encoding="utf-8-sig"))
+        return int(cfg.get("port") or 8899)
+    except Exception:
+        return 8899
+
+
+def _echo_port() -> int:
+    """ECHO 端口以 data/echo-port.txt 为准（ECHO 启动时写出），回退 8970。"""
+    try:
+        return int((ROOT / "data" / "echo-port.txt").read_text(encoding="ascii").strip())
+    except Exception:
+        return 8970
+
+
+BASE = "http://127.0.0.1:%d" % _router_port()
+ECHO_API = "http://127.0.0.1:%d/api" % _echo_port()
 
 
 def get(url, timeout=8):

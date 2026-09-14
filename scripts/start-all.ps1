@@ -17,5 +17,5 @@ Write-Host '[2/3] 启动 ECHO 面板 (8970) ...'
 Start-Sleep 2
 
 Write-Host '[3/3] 若 DSH 未就绪，通过面板拉起:'
-Write-Host '      1. 浏览器打开 http://127.0.0.1:8970'
+Write-Host '      1. 浏览器打开面板（端口见 data\echo-port.txt）'
 Write-Host '      2. 仪表盘 → DSH 执行引擎 → 启动'

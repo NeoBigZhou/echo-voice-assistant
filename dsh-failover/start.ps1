@@ -31,8 +31,15 @@ New-Item -ItemType Directory -Force -Path $logDir | Out-Null
 $log    = Join-Path $logDir 'proxy.log'
 $logErr = Join-Path $logDir 'proxy.err.log'
 
-# 已在运行则退出（端口探测：8899 默认）
-$probe = 8899
+# 已在运行则退出（端口探测：读 config.json）
+# 端口以 config.json 的 "port" 为准（不再写死：Windows 动态端口段会被
+# Hyper-V/WSL 保留且重启漂移，落在其中的端口 bind 会失败）
+$cfgPath = Join-Path $PSScriptRoot 'config.json'
+$probe = 0
+if (Test-Path $cfgPath) {
+    try { $probe = [int]((Get-Content $cfgPath -Raw -Encoding UTF8 | ConvertFrom-Json).port) } catch { $probe = 0 }
+}
+if (-not $probe -or $probe -le 0) { $probe = 8899 }
 if ($Port -ne 0) { $probe = $Port }
 try {
     $h = Invoke-RestMethod -Uri "http://127.0.0.1:$probe/health" -TimeoutSec 2 -ErrorAction Stop

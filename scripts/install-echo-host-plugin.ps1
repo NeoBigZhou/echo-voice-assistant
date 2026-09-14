@@ -338,6 +338,6 @@ if ($verifyFailed) { Fail '[FAIL] composition check failed - the patch may be in
 
 Say ''
 Say '  Done. The plugin loads on the next DSH Desktop start:' 'Green'
-Say '    - guards/auto-starts ECHO (http://127.0.0.1:8970)'
+Say '    - guards/auto-starts ECHO'
 Say '    - Ctrl+Shift+E expands/collapses the right-edge dashboard sidebar'
 Say '  DSH Desktop must be restarted: the profile patch layer is composed at start.' 'Yellow'

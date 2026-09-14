@@ -168,8 +168,8 @@ def api_status(_auth=Depends(optional_auth)):
 
 
 # ---------------------------------------------------------------- 模型路由（只读转发 + 组管理）
-# 路由进程地址（dsh-failover/proxy.py 默认端口）。未运行时不报错，返回 offline 结构。
-FAILOVER_HEALTH_URL = "http://127.0.0.1:8899/health"
+# 路由进程地址不在此处写死：由 app/router_admin.py 经 llm_router.route_base_url()
+# 在调用时按 dsh-failover/config.json 的 port 求值。未运行时不报错，返回 offline 结构。
 
 
 @router.get("/failover/health")

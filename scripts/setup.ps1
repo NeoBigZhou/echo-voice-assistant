@@ -61,4 +61,4 @@ if (Test-Path $installer) {
 }
 
 Write-Host ''
-Write-Host '完成！启动:  scripts\start.ps1   （面板 http://127.0.0.1:8970）' -ForegroundColor Green
+Write-Host '完成！启动:  scripts\start.ps1   （面板地址见 data\echo-port.txt）' -ForegroundColor Green

@@ -70,6 +70,27 @@ function resolveEchoRoot() {
 }
 const ECHO_ROOT = resolveEchoRoot();
 
+/**
+ * ECHO 服务端口。优先环境变量 ECHO_PORT，其次读 ~/.dsh/settings.yaml 里由 ECHO
+ * 自己维护的 `serverPort` 注释行，最后回退默认值。
+ *
+ * 为什么不写死：Windows 动态端口段（默认 1024-15000）会被 Hyper-V/WSL 划为保留段，
+ * 且每次重启都会漂移——落在保留段里的端口 bind 会失败（Errno 13），届时 ECHO 起不来，
+ * 而本插件的探活/守护地址若还盯着旧端口，就会误判"ECHO 未就绪"并反复重启。
+ */
+function resolveEchoPort() {
+  const fromEnv = parseInt(process.env.ECHO_PORT || "", 10);
+  if (Number.isInteger(fromEnv) && fromEnv > 0) return fromEnv;
+  try {
+    const h = process.env.USERPROFILE || process.env.HOME || "";
+    const y = readFileSync(join(h, ".dsh", "settings.yaml"), "utf8");
+    const m = y.match(/^\s*#\s*serverPort:\s*(\d+)\s*$/m);
+    if (m) return parseInt(m[1], 10);
+  } catch { /* 读不到就用默认值 */ }
+  return 8970;
+}
+const ECHO_PORT = resolveEchoPort();
+
 // ---------------------------------------------------------------- 文件日志通道
 // 为什么需要它：DSH 的 `ctx.logger` 在插件里可能取不到（`ctx.logger?.info` 会静默
 // 变成 no-op），而 `attachEchoPanel(...).catch(() => {})` 也会把异常吞掉——两者叠加
@@ -150,9 +171,9 @@ async function acquireElectronApi(log) {
 }
 
 // ECHO API 探活地址
-const ECHO_STATUS_URL = "http://127.0.0.1:8970/api/status";
+const ECHO_STATUS_URL = `http://127.0.0.1:${ECHO_PORT}/api/status`;
 // ECHO 控制面板（仪表盘）地址
-const ECHO_PANEL_URL = "http://127.0.0.1:8970/";
+const ECHO_PANEL_URL = `http://127.0.0.1:${ECHO_PORT}/`;
 // 守护探测间隔（毫秒）
 const GUARD_INTERVAL_MS = 15000;
 // ECHO 启动超时（毫秒）：超过该时间且连续探活失败才重启
@@ -162,7 +183,7 @@ const PROBE_TIMEOUT_MS = 4000;
 // 连续探活失败多少次才判定 ECHO 不可用（防瞬时抖动误判 → 误重启杀死正在录音的会议）
 const PROBE_FAIL_LIMIT = 3;
 // ECHO 关键事件上报地址（面板「守护进程关键事件」栏数据源）
-const GUARD_API_URL = "http://127.0.0.1:8970/api/guard/log";
+const GUARD_API_URL = `http://127.0.0.1:${ECHO_PORT}/api/guard/log`;
 // ECHO 离线期间关键事件暂存上限（就绪后补发，防长期离线内存膨胀）
 const GUARD_PENDING_MAX = 200;
 // ECHO stderr 刷屏行过滤（不写 DSH 日志）：httpx 健康检查 / uvicorn access / 模型下载进度
@@ -299,9 +320,9 @@ async function attachEchoPanel(log) {
     });
     panel.setMenuBarVisibility(false);
     fileLog(`panel window created id=${panel.id} bounds=${JSON.stringify(panel.getBounds())} screenAvailable=${!!screen}`);
-    // 面板内打开 8970 链接（如会议详情）→ 普通窗口；其它一律拒绝
+    // 面板内打开本机 ECHO 链接（如会议详情）→ 普通窗口；其它一律拒绝
     panel.webContents.setWindowOpenHandler(({ url }) => {
-      if (String(url || "").startsWith("http://127.0.0.1:8970/")) {
+      if (String(url || "").startsWith(`http://127.0.0.1:${ECHO_PORT}/`)) {
         return {
           action: "allow",
           overrideBrowserWindowOptions: {

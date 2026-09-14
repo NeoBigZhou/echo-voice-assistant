@@ -29,7 +29,10 @@ from pathlib import Path
 BASE_DIR = Path(__file__).resolve().parent.parent
 ROUTER_CONFIG = BASE_DIR / "dsh-failover" / "config.json"
 ROUTER_HOST = "127.0.0.1"
-ROUTER_PORT = 8899
+# 路由监听端口由 dsh-failover/config.json 的 "port" 决定（默认见 ROUTER_DEFAULT_PORT）。
+# 2026-09-14 起不再写死：Windows 动态端口段（默认 1024-15000）会被 Hyper-V/WSL 划为
+# 保留段且每次重启漂移，落在其中的端口会 bind 失败（Errno 13）。改配置即可迁移端口。
+ROUTER_DEFAULT_PORT = 8899
 ROUTE_ID = "echo-auto"                 # settings.yaml 里的 provider 键名
 TOKEN_REF = "ECHO_ROUTER_TOKEN"        # 凭据 ref 名（DSH 用它做 apiKeyEnv）
 
@@ -74,8 +77,16 @@ def groups() -> list:
     return out
 
 
+def route_port() -> int:
+    """路由监听端口：优先取 config.json 的 port，取不到用默认值。"""
+    try:
+        return int(_router_config().get("port") or ROUTER_DEFAULT_PORT)
+    except Exception:
+        return ROUTER_DEFAULT_PORT
+
+
 def route_base_url() -> str:
-    return f"http://{ROUTER_HOST}:{ROUTER_PORT}"
+    return f"http://{ROUTER_HOST}:{route_port()}"
 
 
 # ---------------------------------------------------------------- 令牌
