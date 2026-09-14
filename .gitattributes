@@ -1,3 +1,9 @@
+# ---- Shell 脚本必须保持 LF ----
+# 仓库开着 core.autocrlf=true，若不声明，.githooks/pre-commit 这类脚本在
+# checkout 时会变成 CRLF，被 sh 执行时报 "\r: not found" 而静默失效。
+.githooks/** -text
+*.sh          -text
+
 # ---- 模型文件一律按二进制处理（不做任何行尾转换）----
 # 仓库开着 core.autocrlf=true：若不声明，tokens.txt / en.phone / config.yaml 这类文本文件
 # 在 checkout 时会被转成 CRLF，而 tokens.txt 每行就是一个 token，末尾多出 \r 会改变 token 内容
