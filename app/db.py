@@ -30,7 +30,6 @@ import json
 import os
 import sqlite3
 import threading
-import time
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DATA_DIR = os.path.join(os.path.dirname(BASE_DIR), "data")
@@ -461,12 +460,13 @@ def list_meetings(limit=100, offset=0):
 
 
 def delete_meeting(meeting_id):
-    conn = get_conn()
-    try:
-        conn.execute("DELETE FROM meetings WHERE id=?", (meeting_id,))
-        conn.commit()
-    finally:
-        conn.close()
+    with _write_lock:
+        conn = get_conn()
+        try:
+            conn.execute("DELETE FROM meetings WHERE id=?", (meeting_id,))
+            conn.commit()
+        finally:
+            conn.close()
 
 
 def set_meeting_status_by_name(name, status):
@@ -475,32 +475,34 @@ def set_meeting_status_by_name(name, status):
 
 def clear_meeting_lines(meeting_id):
     """清空说话人+转写行（重新转写前调用；保留纪要记录）。"""
-    conn = get_conn()
-    try:
-        conn.execute("DELETE FROM speakers WHERE meeting_id=?", (meeting_id,))
-        conn.execute("DELETE FROM lines WHERE meeting_id=?", (meeting_id,))
-        conn.commit()
-    finally:
-        conn.close()
+    with _write_lock:
+        conn = get_conn()
+        try:
+            conn.execute("DELETE FROM speakers WHERE meeting_id=?", (meeting_id,))
+            conn.execute("DELETE FROM lines WHERE meeting_id=?", (meeting_id,))
+            conn.commit()
+        finally:
+            conn.close()
 
 
 # ---------------------------------------------------------------- speakers
 
 def replace_speakers(meeting_id, speaker_map):
     """speaker_map: {label: 显示名}。保留用户改过名的条目。"""
-    conn = get_conn()
-    try:
-        existing = {r["label"]: r["name"] for r in conn.execute(
-            "SELECT label,name FROM speakers WHERE meeting_id=?", (meeting_id,)).fetchall()}
-        conn.execute("DELETE FROM speakers WHERE meeting_id=?", (meeting_id,))
-        for label, default_name in speaker_map.items():
-            name = existing.get(label, "") or default_name
-            conn.execute(
-                "INSERT OR IGNORE INTO speakers(meeting_id,label,name) VALUES(?,?,?)",
-                (meeting_id, label, name))
-        conn.commit()
-    finally:
-        conn.close()
+    with _write_lock:
+        conn = get_conn()
+        try:
+            existing = {r["label"]: r["name"] for r in conn.execute(
+                "SELECT label,name FROM speakers WHERE meeting_id=?", (meeting_id,)).fetchall()}
+            conn.execute("DELETE FROM speakers WHERE meeting_id=?", (meeting_id,))
+            for label, default_name in speaker_map.items():
+                name = existing.get(label, "") or default_name
+                conn.execute(
+                    "INSERT OR IGNORE INTO speakers(meeting_id,label,name) VALUES(?,?,?)",
+                    (meeting_id, label, name))
+            conn.commit()
+        finally:
+            conn.close()
 
 
 def get_speakers(meeting_id):
@@ -514,15 +516,16 @@ def rename_speaker(meeting_id, label, new_name):
 
 def merge_speakers(meeting_id, source_label, target_label):
     """把 source_label 合并进 target_label：所有行改标 target，删除 source。"""
-    conn = get_conn()
-    try:
-        conn.execute("UPDATE lines SET speaker_label=? WHERE meeting_id=? AND speaker_label=?",
-                     (target_label, meeting_id, source_label))
-        conn.execute("DELETE FROM speakers WHERE meeting_id=? AND label=?",
-                     (meeting_id, source_label))
-        conn.commit()
-    finally:
-        conn.close()
+    with _write_lock:
+        conn = get_conn()
+        try:
+            conn.execute("UPDATE lines SET speaker_label=? WHERE meeting_id=? AND speaker_label=?",
+                         (target_label, meeting_id, source_label))
+            conn.execute("DELETE FROM speakers WHERE meeting_id=? AND label=?",
+                         (meeting_id, source_label))
+            conn.commit()
+        finally:
+            conn.close()
 
 
 def cleanup_empty_speakers(meeting_id):

@@ -12,13 +12,12 @@
 
 提示音：assets/beeps/*.wav，winsound 异步播放。
 """
+import atexit
 import os
 import subprocess
 import threading
 import tempfile
 import time
-
-import numpy as np
 
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 BEEPS_DIR = os.path.join(BASE_DIR, "assets", "beeps")
@@ -138,7 +137,6 @@ def _sapi_kill():
             pass
 
 
-import atexit
 atexit.register(_sapi_kill)
 
 

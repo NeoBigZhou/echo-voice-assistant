@@ -1,0 +1,20 @@
+# ECHO macOS 精简依赖（不含 Windows 专属/重型可选组件）
+# 安装：venv/bin/python -m pip install -r mac/requirements-mac.txt
+#
+# 说明：不做语音唤醒、说话人分离时无需安装 funasr / pyannote.audio / torch。
+# 需要时再单独装：
+#   venv/bin/pip install funasr          # SenseVoice / Qwen3-ASR
+#   venv/bin/pip install pyannote.audio  # 说话人分离（会拉 torch，体积大）
+#   venv/bin/pip install pynput          # 全局热键（可选）
+
+fastapi>=0.115
+uvicorn[standard]>=0.30
+python-multipart>=0.0.9
+pydantic>=2.7
+faster-whisper>=1.1
+sherpa-onnx>=1.10
+sounddevice>=0.5
+soundfile>=0.12
+numpy>=1.26
+edge-tts>=7.0
+soxr>=0.3

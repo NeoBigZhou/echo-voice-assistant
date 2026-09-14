@@ -41,6 +41,7 @@ import app.db as db
 from app.config import settings
 from app import manager, runtime, services
 from app.api import router
+from app.pathutil import safe_under
 
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 WEB_DIR = os.path.join(BASE_DIR, "web")
@@ -96,8 +97,8 @@ def create_app():
         @app.get("/web/{path:path}")
         def web_static(path: str):
             # 防路径穿越
-            target = os.path.realpath(os.path.join(WEB_DIR, path))
-            if not target.startswith(os.path.realpath(WEB_DIR)) or not os.path.isfile(target):
+            target = safe_under(WEB_DIR, path)
+            if not target or not os.path.isfile(target):
                 raise HTTPException(status_code=404, detail="Not Found")
             return FileResponse(target, headers={"Cache-Control": "no-store"})
 

@@ -90,7 +90,8 @@ def _ready_sherpa():
     if not os.path.isdir(d):
         return False
     files = os.listdir(d)
-    ok = lambda pre, suf: any(f.startswith(pre) and f.endswith(suf) for f in files)
+    def ok(pre, suf):
+        return any(f.startswith(pre) and f.endswith(suf) for f in files)
     return ok("encoder", ".onnx") and ok("decoder", ".onnx") and ok("joiner", ".onnx") \
         and os.path.isfile(os.path.join(d, "tokens.txt"))
 
@@ -217,7 +218,8 @@ def inventory():
         probe = _PROBES.get(e["id"])
         if probe is None:
             name = e["id"].split("-", 1)[1] if e["id"].startswith("whisper-") else ""
-            probe = (lambda n=name: _ready_whisper(n))
+            def probe(n=name):
+                return _ready_whisper(n)
         try:
             ready = bool(probe())
         except Exception:
@@ -385,4 +387,3 @@ def jobs():
         j["active"] = (mid == active)
         out[mid] = j
     return {"active": active, "items": out}
-
