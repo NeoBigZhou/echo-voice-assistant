@@ -220,6 +220,11 @@ DEFAULTS = {
     "worklogEnabled": dict(value=False, grp="worklog", label="启用纪要归档",
                            description="关闭时「写工作日志」按钮不可用，仅在本地保留纪要文件",
                            value_type="bool"),
+    "worklogEnsureSessionAccess": dict(value=True, grp="worklog", label="归档前校正会话权限",
+                                       description="归档前检查并校正 DSH 新会话默认权限为全盘访问"
+                                                   "（笔记库在会话工作区之外，权限不足会被沙箱拦下、"
+                                                   "只能靠自动提权重试，很慢）；关闭后只告警不修改",
+                                       value_type="bool"),
     "worklogVaultRoot": dict(value="", grp="worklog", label="笔记库根目录",
                              description="纪要归档的目标根目录（如 Obsidian 库路径）。同时作为归档 DSH 会话的工作区",
                              value_type="str"),
