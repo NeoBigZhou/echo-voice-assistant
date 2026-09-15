@@ -15,6 +15,7 @@
   app/audio/diarize.py  PYANNOTE_DIR / SEG_DIR / EMB_DIR / PLDA_DIR
 ModelScope 缓存固定在 ~/.cache/modelscope/models（funasr 不认识中文路径，所以不放仓库里）。
 """
+import importlib.util
 import os
 import shlex
 import threading
@@ -60,11 +61,30 @@ def _ms_dir(model_id):
     return os.path.join(MS_CACHE, model_id.replace("/", "--"))
 
 
-def _ready_sensevoice():
-    """本地 models/sensevoice（含多层 snapshots）或 ModelScope 缓存二选一。"""
+def _pkg_available(name):
+    """仅探测包能否 import（find_spec 不真正加载，避免拖慢面板/占用显存）。"""
+    try:
+        return importlib.util.find_spec(name) is not None
+    except (ImportError, ValueError):
+        return False
+
+
+def _sensevoice_model_dir():
+    """本地 models/sensevoice（含多层 snapshots）或 ModelScope 缓存，返回落地目录或 None。"""
     if _first_stem_dir_with_files(os.path.join(MODELS_DIR, "sensevoice"), ["model."]):
-        return True
-    return os.path.isdir(_ms_dir("iic/SenseVoiceSmall"))
+        return os.path.join(MODELS_DIR, "sensevoice")
+    if os.path.isdir(_ms_dir("iic/SenseVoiceSmall")):
+        return _ms_dir("iic/SenseVoiceSmall")
+    return None
+
+
+def _ready_sensevoice():
+    """模型落地 + funasr/torch 运行时都齐了才算就绪。
+
+    只下载模型、没装 funasr（或 torch）时跑不起来，此时不应显示「已就绪」。
+    """
+    return (_sensevoice_model_dir() is not None
+            and _pkg_available("funasr") and _pkg_available("torch"))
 
 
 def _whisper_hub_dir(name):
@@ -145,7 +165,9 @@ CATALOG = [
          purpose="语音命令 + 会议转写的默认引擎", size="~896 MB",
          target="models/sensevoice 或 ModelScope 缓存（二选一）",
          source="auto", ref="iic/SenseVoiceSmall",
-         how="选中即用：首次加载会自动从 ModelScope 下载（含 VAD）。也可先手动拉：",
+         how="还需 funasr + torch 运行时（Windows 随 requirements.txt 装好；macOS 运行 "
+             "`venv/bin/pip install funasr modelscope torch`）。选中即用：首次加载会自动从 "
+             "ModelScope 下载模型（含 VAD）。也可先手动拉：",
          cmd='python -c "from modelscope import snapshot_download; print(snapshot_download(\'iic/SenseVoiceSmall\'))"'),
 
     dict(id="qwen3asr", group="转写引擎", name="Qwen3-ASR 0.6B + 强制对齐",
@@ -208,7 +230,7 @@ def _target_path(entry):
     """就绪检测对应的实际目录（用于统计本地占用）。"""
     i = entry["id"]
     if i == "sensevoice":
-        return os.path.join(MODELS_DIR, "sensevoice") if _ready_sensevoice() else os.path.join(MS_CACHE, "iic--SenseVoiceSmall")
+        return _sensevoice_model_dir() or _ms_dir("iic/SenseVoiceSmall")
     if i == "qwen3asr":
         return _ms_dir("Qwen/Qwen3-ASR-0.6B")
     if i == "sherpa":

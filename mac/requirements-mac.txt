@@ -3,8 +3,9 @@
 #
 # 说明：不做语音唤醒、说话人分离时无需安装 funasr / pyannote.audio / torch。
 #       PyYAML / ruamel.yaml 是「模型路由」页签读写 DSH 配置用的，别省。
-# 需要时再单独装：
-#   venv/bin/pip install funasr modelscope  # SenseVoice / Qwen3-ASR + 模型下载
+# 需要时再单独装（均已在 Apple 芯片 macOS 上实测可用）：
+#   venv/bin/pip install funasr modelscope torch  # SenseVoice / Qwen3-ASR + 模型下载
+#                                                 # 注意：funasr 1.4 起不再自动带 torch，要单独装
 #   venv/bin/pip install pyannote.audio  # 说话人分离（会拉 torch，体积大）
 #   venv/bin/pip install pynput          # 全局热键（可选）
 
