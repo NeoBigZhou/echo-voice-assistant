@@ -204,6 +204,20 @@ final class Sidebar: NSObject, NSApplicationDelegate, WKScriptMessageHandler,
         }
     }
 
+    // window.open(...) / target=_blank 走这里 —— WKWebView 不会为它触发 decidePolicyFor。
+    // Windows 边条用 WebView2 的 NewWindowRequested 在默认浏览器打开（sidebar/Program.cs），
+    // mac 用 NSWorkspace 对齐；否则面板里点会议详情
+    //（window.open('/web/meeting.html?id=...')）会毫无反应。
+    func webView(_ webView: WKWebView, createWebViewWith configuration: WKWebViewConfiguration,
+                 for navigationAction: WKNavigationAction,
+                 windowFeatures: WKWindowFeatures) -> WKWebView? {
+        if let url = navigationAction.request.url,
+           ["http", "https"].contains(url.scheme ?? "") {
+            NSWorkspace.shared.open(url)
+        }
+        return nil
+    }
+
     func webView(_ webView: WKWebView, runJavaScriptConfirmPanelWithMessage message: String,
                  initiatedByFrame frame: WKFrameInfo, completionHandler: @escaping (Bool) -> Void) {
         let alert = NSAlert()

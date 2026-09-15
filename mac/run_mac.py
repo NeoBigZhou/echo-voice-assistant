@@ -25,7 +25,8 @@ import app.config as _config  # noqa: E402
 _config.DEFAULTS["panelOpenMode"]["value"] = "sidebar"
 _config.DEFAULTS["panelOpenMode"]["description"] = "sidebar=macOS 右缘浮动框；browser=浏览器打开面板"
 _config.DEFAULTS["panelOpenMode"]["options"] = ["sidebar", "browser"]
-# Mac 上用 Whisper，避免 funasr/SenseVoice 在 Apple 芯片上的兼容坑
+# Mac 默认用 Whisper（内置依赖、开箱即用）。想用 SenseVoice/Qwen3-ASR 需另装
+# funasr+torch，已在 Apple 芯片上实测可用（见 mac/README.md），可在设置里自行切换。
 _config.DEFAULTS["sttModel"]["value"] = "base"
 _config.DEFAULTS["meetingSttModel"]["value"] = "small"
 # Mac 没有 CUDA

@@ -107,8 +107,21 @@ bash mac/build_sidebar.sh
 使用说话人分离仍需在项目环境安装 pyannote.audio 4.x 与 speechbrain；
 模型文件完整不代表运行依赖已安装。完成后重启 ECHO 并在会议设置中开启说话人分离。
 
+### SenseVoice / Qwen3-ASR（中文更准）
+
+macOS 默认用 Whisper。想换成中文更准的 SenseVoice，需先装 `funasr`——注意
+**funasr 1.4 起不再自动安装 torch**，要一起装，否则会报 `No module named 'funasr'`：
+
 ```bash
-venv/bin/pip install funasr modelscope  # SenseVoice / Qwen3-ASR（中文短命令更快）
+venv/bin/pip install funasr modelscope torch
+```
+
+装好后在「设置 → 会议 → 会议转写模型」选择 `sensevoice`（命令引擎 `sttModel` 也可选）。
+首次使用会自动从 ModelScope 下载模型（约 900MB，落 `~/.cache/modelscope`）。
+已在 Apple 芯片（arm64）macOS 上实测可用：加载约 7 秒、CPU 转写正常。
+模型面板的「就绪」现在同时要求模型文件与 `funasr`/`torch` 可导入，缺一即显示未就绪。
+
+```bash
 venv/bin/pip install pyannote.audio  # 会议说话人分离（会拉 torch，体积很大）
 ```
 
