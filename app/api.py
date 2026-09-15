@@ -126,6 +126,13 @@ class WorklogIn(BaseModel):
     project: str = ""
 
 
+class VoiceprintEnrollIn(BaseModel):
+    """把某场会议某说话人的声音入库到联系人名下。"""
+    meeting_id: int
+    label: str
+    name: str
+
+
 class KeyCreateIn(BaseModel):
     name: str = "mobile"
 
@@ -616,12 +623,31 @@ def clean_short_meetings(body: CleanShortIn, _auth=Depends(optional_auth)):
 
 @router.post("/meetings/{mid}/speaker/rename")
 def speaker_rename(mid: int, body: SpeakerRenameIn, _auth=Depends(optional_auth)):
+    """说话人改名；改名为联系人（非默认名）时按设置自动把声纹入库。"""
     m = db.get_meeting(mid)
     if not m:
         raise HTTPException(status_code=404, detail="会议不存在")
     db.rename_speaker(mid, body.label, body.name)
+    msg = ""
+    try:
+        from app import voiceprint
+        if (voiceprint.enabled() and voiceprint.auto_enroll()
+                and not voiceprint.is_default_name(body.name, body.label)):
+            _ok, msg = voiceprint.enroll_from_meeting(mid, body.label, body.name)
+    except Exception as e:
+        db.add_log("warn", "voiceprint", f"重命名后的声纹入库失败：{e}")
+        msg = "声纹入库失败（见日志），改名已生效"
     meeting.export_transcript(mid)
-    return {"ok": True}
+    return {"ok": True, "message": msg}
+
+
+@router.post("/meetings/{mid}/speaker/recognize")
+def speaker_recognize(mid: int, _auth=Depends(optional_auth)):
+    """用声纹库给本场说话人重新认人（只用转写时留存的样本，不重新分离/转写）。"""
+    m = db.get_meeting(mid)
+    if not m:
+        raise HTTPException(status_code=404, detail="会议不存在")
+    return meeting.recognize_meeting_speakers(mid)
 
 
 @router.post("/meetings/{mid}/speaker/merge")
@@ -714,6 +740,45 @@ def meeting_file(mid: int, kind: str = "transcript", _auth=Depends(optional_auth
             sec = (f"# 会议摘要\n\n{abstract}\n\n---\n\n{minutes}" if abstract else minutes)
             return {"exists": True, "content": sec}
     return {"exists": True, "content": content}
+
+
+# ---------------------------------------------------------------- 声纹库（常用联系人）
+# 会议里把说话人改名为联系人即自动入库（voiceprintAutoEnroll）；
+# 库里的样本可在面板「说话人管理」查看/删除，这里是对应的 REST 入口。
+
+@router.get("/voiceprints")
+def get_voiceprints(_auth=Depends(optional_auth)):
+    """声纹库：联系人 + 样本列表 + 当前生效参数（面板「说话人管理」渲染）。"""
+    from app import voiceprint
+    thr, margin = voiceprint.thresholds()
+    stats = voiceprint.library_stats()
+    return {"items": voiceprint.library_view(), "enabled": voiceprint.enabled(),
+            "autoEnroll": voiceprint.auto_enroll(), "threshold": thr, "margin": margin,
+            "contacts": stats["contacts"], "total": stats["samples"]}
+
+
+@router.post("/voiceprints/enroll")
+def voiceprint_enroll(body: VoiceprintEnrollIn, _auth=Depends(optional_auth)):
+    """把某场会议某说话人的声纹入库（改名自动入库之外的显式入口）。"""
+    from app import voiceprint
+    ok, msg = voiceprint.enroll_from_meeting(body.meeting_id, body.label.strip(), body.name)
+    return {"ok": ok, "message": msg}
+
+
+@router.delete("/voiceprints/{vid}")
+def voiceprint_delete(vid: int, _auth=Depends(optional_auth)):
+    """删除单条声纹样本。"""
+    from app import voiceprint
+    ok, msg = voiceprint.delete_sample(vid)
+    return {"ok": ok, "message": msg}
+
+
+@router.delete("/voiceprints")
+def voiceprint_delete_name(name: str = "", _auth=Depends(optional_auth)):
+    """按联系人删除其全部声纹样本（name 必填）。"""
+    from app import voiceprint
+    ok, msg = voiceprint.delete_contact(name)
+    return {"ok": ok, "message": msg}
 
 
 # ---------------------------------------------------------------- 控制

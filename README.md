@@ -20,7 +20,7 @@ ECHO 自己**不做推理**，只负责录音、转写、编排、面板与播�
 
 | 功能 | 在哪里执行 | 数据去向 |
 |---|---|---|
-| 转写（命令/会议）、唤醒词、说话人分离 | **本机**（SenseVoice / Whisper / Qwen3-ASR / sherpa-onnx / KWS / pyannote） | 不出网 |
+| 转写（命令/会议）、唤醒词、说话人分离、声纹识别 | **本机**（SenseVoice / Whisper / Qwen3-ASR / sherpa-onnx / KWS / pyannote） | 不出网 |
 | 录音与转写文件 | **本机** `data/meetings/`（SQLite + wav + md） | 不出网 |
 | **会议纪要 / 议题分段** | 本机记录，**推理在 DSH 配置的模型服务** | **转写全文会发给该模型服务**：内网网关就是贵单位内网，公网 API 就是模型厂商（如 DeepSeek 官方） |
 | **指令执行** | 同上（DSH 会话 + 技能） | **你的指令文本与相关上下文会发给该模型服务** |
@@ -37,6 +37,9 @@ ECHO 自己**不做推理**，只负责录音、转写、编排、面板与播�
   （需要出网的是"交给大模型"和"默认的在线语音合成"，见上表）。
 - **指令只要一句结论**：提示词要求模型先给极简结论再给详情，语音只念结论，详情留在会话里。
 - **会议纪要**：分段录音、按需/常驻双转写引擎、说话人分离（pyannote）、纪要归档可委派给你自己的技能。
+- **常用联系人声纹**：在会议里把说话人**改名成联系人**（如「张总」）即自动入库；下次会议听到同一个人的
+  声音会自动把 TA 标成联系人名，同一个人被分离成两簇时自动合并（阈值/开关见 设置 → 会议；
+  样本只存本机 `data/echo.db`）。
 - **右缘边条**：**ECHO 启动后自动**在屏幕右缘显示一条 64px 折叠条（录音、电平、说话、状态灯），
   `Ctrl+Shift+E` 展开/收起；不想自动显示可在 设置 → 语音与命令 关掉（`panelAutoStart`），
   也可设成"启动即展开面板"（`panelStartCollapsed=false`）。
@@ -121,6 +124,7 @@ echo-voice-assistant/
 | `ttsEngine` | `auto` / `edge-tts` / `sapi` / `off` |
 | `minimalReply*` | 「先结论、后详情」的提示词与字数上限 |
 | `worklogEnabled` / `worklogVaultRoot` / `worklogMode` | 纪要归档：把归档委派给你自己的技能（见 [docs/worklog.md](docs/worklog.md)） |
+| `voiceprintEnabled` / `voiceprintAutoEnroll` / `voiceprintThreshold` / `voiceprintMargin` | 常用联系人声纹：转写时自动认人 / 改名自动入库 / 匹配阈值 / 歧义间隔 |
 | `apiAuthEnabled` | 开启后除 `/api/status` 外都需要 `Authorization: Bearer <token>` |
 
 ## 模型路由（ECHO AUTO）
@@ -238,7 +242,7 @@ ECHO 也可以完全脱离 DSH 独立启动（转写、会议、面板都不依�
 | `POST /api/boot/component/{id}/start\|stop` | 组件启动/重试/停止（dsh/stt-cmd/stt-meeting/tts/wake/hotkey） |
 | `POST /api/meeting/start\|stop` | 会议录音开关 |
 | `GET /api/meetings` · `GET /api/meetings/{id}` | 会议列表 / 详情 |
-| `POST /api/meetings/{id}/speaker/rename\|merge` | 说话人改名 / 合并 |
+| `POST /api/meetings/{id}/speaker/rename\|merge\|recognize` | 说话人改名（改名即声纹入库）/ 合并 / 声纹识别本场 |
 | `POST /api/meetings/{id}/summary/regenerate` | 重新生成纪要（含语义分段） |
 | `POST /api/control/dsh/start\|stop` | DSH 服务管理 |
 | `POST /api/control/stt/unload` | 卸载转写模型（释放显存） |

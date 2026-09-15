@@ -206,6 +206,24 @@ DEFAULTS = {
                                 description="删除会议时是否同时删除音频", value_type="bool"),
     "meetingDiarize":   dict(value=False, grp="meeting", label="区分说话人",
                              description="本地 pyannote 分离（CPU 下较慢）", value_type="bool"),
+    # ---------- 常用联系人声纹（issue #6）：改名入库 → 新会议自动认人 ----------
+    # 样本是说话人嵌入（256 维），只存本机 data/echo.db；不做云端、不出网。
+    "voiceprintEnabled": dict(value=True, grp="meeting", label="声纹识别常用联系人",
+                              description="会议转写时用声纹库自动识别已入库的联系人，"
+                                          "把「说话人N」直接标成联系人名（需先开启「区分说话人」，"
+                                          "且联系人有已入库的声纹样本）",
+                              value_type="bool"),
+    "voiceprintAutoEnroll": dict(value=True, grp="meeting", label="改名时自动入库声纹",
+                                 description="在会议里把说话人改名为联系人时，自动把该说话人本场的声音"
+                                             "存成声纹样本（样本可在会议页「说话人管理」里查看/删除）",
+                                 value_type="bool"),
+    "voiceprintThreshold": dict(value=0.65, grp="meeting", label="声纹匹配阈值",
+                                description="余弦相似度下限（0~1）：越高越不容易认错人、也越容易漏认。"
+                                            "默认 0.65 偏保守；先看日志（source=voiceprint）里的实际相似度再调",
+                                value_type="float"),
+    "voiceprintMargin": dict(value=0.05, grp="meeting", label="声纹歧义间隔",
+                             description="候选联系人与次优的最小差距：差距过小视为认不准，不自动命名",
+                             value_type="float"),
     "meetingWorkspace": dict(value="{ECHO}/data/meetings", grp="meeting",
                              label="会议纪要工作区",
                              description="一场会议一个 DSH 会话（纪要/分段/归档共用），下一场新建；"
