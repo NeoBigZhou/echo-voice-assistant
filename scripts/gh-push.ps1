@@ -30,6 +30,7 @@
 param(
     [string]$Message = '',
     [switch]$Verify,
+    [switch]$SkipCheck,
     [int]$Retries = 3,
     [int]$TopN = 3,
     [int]$LowSpeedSeconds = 90
@@ -111,6 +112,24 @@ if ($Message) {
     Write-Host "committed: $Message" -ForegroundColor Green
 } elseif ((git status --short | Measure-Object -Line).Lines -gt 0) {
     Write-Host 'uncommitted changes present: pass -Message "..." to include them, or commit first.' -ForegroundColor Yellow
+}
+
+# ---- Windows smoke gate ----
+# Same checks CI runs, but on this machine, right before anything leaves it. Skipped for
+# -Verify (probe only) and for -SkipCheck (escape hatch: broken venv / offline work).
+if (-not $SkipCheck -and -not $Verify) {
+    $gate = Join-Path $PSScriptRoot 'check-windows.ps1'
+    if (Test-Path $gate) {
+        Write-Host '=== Windows gate: scripts\check-windows.ps1 ===' -ForegroundColor Cyan
+        & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $gate
+        if ($LASTEXITCODE -ne 0) {
+            Write-Host ''
+            Write-Host 'gate FAILED - nothing was pushed. Fix it, or re-run with -SkipCheck to override.' -ForegroundColor Red
+            exit 1
+        }
+    } else {
+        Write-Host 'check-windows.ps1 not found - gate skipped.' -ForegroundColor Yellow
+    }
 }
 
 $branch = git symbolic-ref --short HEAD

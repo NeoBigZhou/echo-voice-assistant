@@ -6,6 +6,7 @@
 用法: python scripts/probe_mediakeys.py [seconds]
 """
 import ctypes
+import os
 import sys
 import time
 import datetime
