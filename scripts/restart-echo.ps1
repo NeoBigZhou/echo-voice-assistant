@@ -1,4 +1,4 @@
-﻿# restart-echo.ps1 - restart the ECHO service (stop, wait for the port to free, start).
+# restart-echo.ps1 - restart the ECHO service (stop, wait for the port to free, start).
 #
 # WHO CALLS THIS: ECHO itself, from POST /api/system/restart -> app/runtime.py:restart_echo().
 # The API process cannot stop and restart itself, so it launches this script DETACHED
@@ -36,6 +36,21 @@ function Write-Log([string]$message) {
     Add-Content -Path $log -Value $line -Encoding UTF8
 }
 
+# ECHO port: ECHO_PORT env -> data\echo-port.txt -> 8970 (was hardcoded to 8970, which
+# stopped matching the live service once the port moved to 18060 - the restart then
+# "confirmed" a port nobody was listening on).
+function Resolve-EchoPort([string]$root) {
+    if ($env:ECHO_PORT) { try { if ([int]$env:ECHO_PORT -gt 0) { return [int]$env:ECHO_PORT } } catch { } }
+    $f = Join-Path $root 'data\echo-port.txt'
+    if (Test-Path $f) {
+        try {
+            $v = (Get-Content $f -Raw -ErrorAction Stop).Trim()
+            if ([int]$v -gt 0) { return [int]$v }
+        } catch { }
+    }
+    return 8970
+}
+
 function Test-EchoPort([int]$port = 8970) {
     $c = New-Object System.Net.Sockets.TcpClient
     try {
@@ -50,10 +65,8 @@ function Test-EchoPort([int]$port = 8970) {
 Write-Log "===== restart requested (wait ${WaitMs}ms) ====="
 Start-Sleep -Milliseconds $WaitMs
 
-$port = 8970
-try {
-    $cfg = Get-Content (Join-Path $root 'data\echo.db') -Raw -ErrorAction SilentlyContinue
-} catch { }
+$port = Resolve-EchoPort $root
+Write-Log "resolved ECHO port=$port"
 
 $stop = Join-Path $scripts 'stop.ps1'
 $start = Join-Path $scripts 'start.ps1'

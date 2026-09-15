@@ -762,9 +762,10 @@ $("#gotoMeetings").addEventListener("click", (e) => { e.preventDefault(); switch
 let _settingsCache = [];
 
 /* 分组展示顺序 = 业务相关性（与后端 grp 取值解耦，后端不因展示顺序而改动）：
-   通用(基础) → 语音命令(主用法) → 唤醒词 → 会议 → 纪要归档 → 模型路由 → 面板(界面) → DSH(底层接入) */
-const SET_GROUP_ORDER = ["general", "voice", "wake", "meeting", "worklog", "router", "panel", "dsh"];
-const SET_GROUP_NAMES = { general: "通用", voice: "语音命令", wake: "唤醒词",
+   智能体(决定谁干活) → 通用(基础) → 语音命令(主用法) → 唤醒词 → 会议 → 纪要归档
+   → 模型路由 → 面板(界面) → DSH(底层接入) */
+const SET_GROUP_ORDER = ["agent", "general", "voice", "wake", "meeting", "worklog", "router", "panel", "dsh"];
+const SET_GROUP_NAMES = { agent: "智能体", general: "通用", voice: "语音命令", wake: "唤醒词",
   meeting: "会议", worklog: "纪要归档", router: "模型路由", panel: "面板", dsh: "DSH 服务" };
 /* 默认展开；用户折叠过的分组记在 localStorage，刷新/重开面板后保持 */
 const SET_COLLAPSE_KEY = "echo.settings.collapsedGroups";
@@ -777,12 +778,138 @@ function _saveCollapsedGroups(set) {
   try { localStorage.setItem(SET_COLLAPSE_KEY, JSON.stringify([...set])); } catch (e) { /* 忽略 */ }
 }
 
+/* 智能体元信息（来自 /api/agents）：
+   {name, displayName, vendor, description, configKey, enabled, active, available, reason, probe} */
+let _agentsCache = [];
+const _agentDirty = {};        // 展开区里改过、但还没点保存的值
+
+/** 智能体状态徽标（探测结论）。 */
+function agentStatusChip(a) {
+  if (!a) return "";
+  let cls = "off", text = "未启用";
+  if (a.enabled && a.available) { cls = "on"; text = "可用"; }
+  else if (a.enabled && !a.available) { cls = "bad"; text = "不可用"; }
+  return `<span class="agent-chip ${cls}">${esc(text)}</span>`;
+}
+
+/** 智能体表格：每行一个开关（互斥单选），选中的那行下方展开它的设置内容。 */
+function renderAgentTable() {
+  const host = $("#agentTable");
+  if (!host) return;
+  if (!_agentsCache.length) { host.innerHTML = `<div class="empty">未取到智能体列表</div>`; return; }
+  const rows = _agentsCache.map((a) => `<div class="agent-row${a.active ? " active" : ""}"
+      data-agent-row="${esc(a.name)}">
+      <div class="agent-cell-name">
+        <div class="an">${esc(a.displayName)}</div>
+        <div class="av">${esc(a.vendor || "")}</div>
+      </div>
+      <div class="agent-cell-state">${agentStatusChip(a)}</div>
+      <div class="agent-cell-switch">
+        <label class="rt-sw" title="${a.active ? "当前正在使用" : "设为 ECHO 使用的智能体"}">
+          <input type="checkbox" data-agent-toggle="${esc(a.name)}" ${a.active ? "checked" : ""}><i></i>
+        </label>
+      </div>
+    </div>`).join("");
+  host.innerHTML = `<div class="agent-table">${rows}</div>
+    <div class="agent-detail" id="agentDetail">${agentDetailHtml()}</div>`;
+}
+
+/** 当前选中智能体的展开设置内容。 */
+function agentDetailHtml() {
+  const cur = _agentsCache.find((a) => a.active);
+  if (!cur) {
+    return `<div class="agent-detail-head">没有选中的智能体 —— 打开上表中任意一个开关即可启用</div>`;
+  }
+  const probeBtn = `<button type="button" class="btn" data-agent-probe="${esc(cur.name)}"
+      title="重新探测该智能体是否可用">检测</button>`;
+  const fields = [];
+  if (cur.name === "codebuddy") {
+    const v = _agentDirty.agentCustomPath !== undefined
+      ? _agentDirty.agentCustomPath : (settingsValue("agentCustomPath") || "");
+    fields.push(`<div class="agent-field">
+      <label for="agent-custom-path">CLI 路径</label>
+      <input class="ctl" id="agent-custom-path" data-agent-field="agentCustomPath"
+             value="${esc(v)}" placeholder="留空 = 自动探测（PATH → WorkBuddy 内置目录）">
+      <div class="desc">仅当自动探测失败时才需要手填可执行文件路径</div>
+    </div>`);
+  }
+  const note = cur.reason
+    ? `<div class="agent-detail-msg ${cur.available ? "ok" : "warn"}">${
+        cur.available ? "✅ " : "⚠ "}${esc(cur.reason)}</div>`
+    : "";
+  const warn = cur.available ? "" :
+    `<div class="agent-detail-msg warn">探测未通过时无法用它执行命令；按上面的提示处理后点「检测」重试。</div>`;
+  return `<div class="agent-detail-head">
+      <strong>${esc(cur.displayName)}</strong>
+      <span class="muted">${esc(cur.vendor || "")}</span>
+      <span class="spacer"></span>${probeBtn}
+    </div>
+    <div class="agent-detail-desc">${esc(cur.description || "")}</div>
+    ${fields.join("")}${note}${warn}`;
+}
+
+/** 取某个配置项的当前值（展开区输入框回填用）。 */
+function settingsValue(key) {
+  const s = _settingsCache.find((x) => x.key === key);
+  return s ? s.value : "";
+}
+
+/** 拉取智能体可用性；probe=true 时做重探测（会真的执行 CLI 探测）。 */
+async function loadAgents(probe = false) {
+  try {
+    const r = await api("/api/agents" + (probe ? "?probe=1" : ""));
+    _agentsCache = r.agents || [];
+    return r;
+  } catch (e) { return null; }
+}
+
+/* ---------------- 设置 → 智能体：开关即单选，切换立即保存 ---------------- */
+$("#settingsForm").addEventListener("change", async (e) => {
+  const toggle = e.target.closest("[data-agent-toggle]");
+  if (toggle) {
+    const name = toggle.dataset.agentToggle;
+    const cur = _agentsCache.find((a) => a.active);
+    if (cur && cur.name === name) return;                 // 点的就是当前项
+    try {
+      await api("/api/settings", { method: "PUT",
+        body: JSON.stringify({ values: { agentBackend: name } }) });
+      await loadAgents(false);
+      renderAgentTable();                                 // 重绘：其余开关自动回弹
+      const now = _agentsCache.find((a) => a.active);
+      toast(`已切换到 ${now ? now.displayName : name}`);
+    } catch (err) { toast("切换失败：" + err.message); renderAgentTable(); }
+    return;
+  }
+  // 展开区字段：先记下，点全局「保存」时随表单一起落库
+  const field = e.target.closest("[data-agent-field]");
+  if (field) _agentDirty[field.dataset.agentField] = field.value;
+});
+
+/* 展开区里的「检测」按钮 */
+$("#settingsForm").addEventListener("click", async (e) => {
+  const btn = e.target.closest("[data-agent-probe]");
+  if (!btn) return;
+  btn.disabled = true;
+  const old = btn.textContent;
+  btn.textContent = "检测中…";
+  const r = await loadAgents(true);
+  btn.disabled = false;
+  btn.textContent = old;
+  if (!r) { toast("检测失败：服务未响应"); return; }
+  renderAgentTable();
+  const a = _agentsCache.find((x) => x.name === btn.dataset.agentProbe);
+  if (a) toast(a.available ? `${a.displayName} 可用` : `${a.displayName} 不可用：${a.reason || ""}`);
+});
+
 async function loadSettings() {
   try {
     const r = await api("/api/settings");
     _settingsCache = r.settings;
+    _agentsCache = r.agents || [];
     const groups = {};
     r.settings.forEach((s) => { (groups[s.grp] = groups[s.grp] || []).push(s); });
+    // 「智能体」分组的配置项都是 hidden（不进 settings），这里补一个空分组占位
+    if (!groups.agent) groups.agent = [];
     // 已知分组按业务相关性排序，未知分组排到末尾（保持出现顺序）
     const known = SET_GROUP_ORDER.filter((g) => groups[g]);
     const extra = Object.keys(groups).filter((g) => !SET_GROUP_ORDER.includes(g));
@@ -791,15 +918,20 @@ async function loadSettings() {
     form.innerHTML = [...known, ...extra].map((g) => {
       const items = groups[g];
       const isCollapsed = collapsed.has(g);
+      const no = g === "agent" ? (_agentsCache.filter((a) => a.active).length || 0) : items.length;
+      const body = g === "agent"
+        ? `<div id="agentTable" class="agent-table-wrap"></div>`
+        : items.map((s) => renderSettingRow(s)).join("");
       return `<div class="set-group${isCollapsed ? " collapsed" : ""}" data-grp="${esc(g)}">
         <div class="set-group-title" role="button" tabindex="0" aria-expanded="${!isCollapsed}">
           <span class="set-arrow">▶</span>
           <span>${esc(SET_GROUP_NAMES[g] || g)}</span>
-          <span class="set-count">${items.length}</span>
+          <span class="set-count">${no}</span>
         </div>
-        <div class="set-group-body">${items.map((s) => renderSettingRow(s)).join("")}</div>
+        <div class="set-group-body">${body}</div>
       </div>`;
     }).join("");
+    renderAgentTable();
     _syncSettingsCollapseAll();     // 重绘后让顶部双箭头跟着当前折叠状态
   } catch (e) { toast("加载设置失败：" + e.message); }
 }
@@ -1016,9 +1148,14 @@ $("#btnSettingsSave").addEventListener("click", async () => {
     else if (meta.value_type === "float") values[key] = parseFloat(el.value) || 0;
     else values[key] = el.value;
   });
+  // 智能体展开区里改过的字段（不在表单行里，单独并进来）
+  Object.keys(_agentDirty).forEach((k) => { values[k] = _agentDirty[k]; });
   try {
     const r = await api("/api/settings", { method: "PUT", body: JSON.stringify({ values }) });
     toast("已保存 " + Object.keys(r.updated).length + " 项");
+    Object.keys(_agentDirty).forEach((k) => delete _agentDirty[k]);
+    await loadAgents(false);
+    renderAgentTable();
   } catch (e) { toast("保存失败：" + e.message); }
 });
 

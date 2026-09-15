@@ -15,7 +15,30 @@
   但 all() 会把它们从面板数据里剔除，因此设置窗口不再出现。
   确认某个已弃用项彻底无人引用后，才可从 DEFAULTS 删除。
 """
+import os
+
 import app.db as db
+
+# ---- 路径占位符 -----------------------------------------------------------
+# 配置里存占位符而不是绝对路径，这样同一个默认值在任何机器/任何安装目录都能用，
+# 也不会把个人路径写进仓库。读取时（Settings._load）统一展开。
+#   {ECHO} = ECHO 根目录（仓库根）
+#   {DATA} = ECHO 的 data 目录
+ECHO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+
+def expand_path(value):
+    """展开配置值里的 {ECHO} / {DATA} 占位符；非字符串原样返回。
+
+    展开后统一走 os.path.normpath：占位符写的是正斜杠（`{ECHO}/data/meetings`），
+    直接拼接会得到 `C:\\...\\ECHO-public/data/meetings` 这种混合分隔符——Windows
+    能用，但日志里难看，且与用户手填的反斜杠路径比较时还需要额外容错。
+    """
+    if not isinstance(value, str) or "{" not in value:
+        return value
+    out = (value.replace("{ECHO}", ECHO_ROOT)
+                .replace("{DATA}", os.path.join(ECHO_ROOT, "data")))
+    return os.path.normpath(out)
 
 # ---- 极简回复要求文案（两个版本都保留：V1 是已落库的旧默认值，用于迁移比对）----
 # V1：只回极简结论、详情留在会话里。
@@ -61,6 +84,15 @@ DEFAULTS = {
                             description="DSH Desktop 2.x 的 Web 服务地址（GUI 与 API 同端口，默认 43120）", value_type="str"),
     "serverPort":      dict(value=8970, grp="general", label="ECHO 面板端口",
                             description="控制面板与 API 的监听端口（8890 曾被系统保留段占用，改用 8970）", value_type="int"),
+    "commandIdleRotateHours": dict(value=4, grp="general", label="命令会话空闲轮换小时",
+                                   description="默认命令会话空闲超过 N 小时且新指令未要求延续上一话题时，"
+                                               "自动轮换新会话（0=关闭；会话不在默认工作区时会强制轮换一次）",
+                                   value_type="float"),
+    "commandWorkspace": dict(value="", grp="general", label="命令会话工作区",
+                             description="默认命令会话建在这个目录对应的 DSH 工作区里，"
+                                         "从而归入侧栏对应分组（例如你自己的「日常交互」）。"
+                                         "留空 = 建在 ECHO 根目录（侧栏显示为未分组）",
+                             value_type="str"),
     "userLocation":    dict(value="北京", grp="general", label="用户所在地",
                             description="发给 DSH 命令时附带的地理位置（天气/时间等问答需要）",
                             value_type="str"),
@@ -174,9 +206,12 @@ DEFAULTS = {
                                 description="删除会议时是否同时删除音频", value_type="bool"),
     "meetingDiarize":   dict(value=False, grp="meeting", label="区分说话人",
                              description="本地 pyannote 分离（CPU 下较慢）", value_type="bool"),
-    "meetingWorkspace": dict(value="", grp="meeting",
+    "meetingWorkspace": dict(value="{ECHO}/data/meetings", grp="meeting",
                              label="会议纪要工作区",
-                             description="会议纪要 DSH 会话的工作区目录；每次会议在此区新建会话，避免上下文累积（留空 = 用 ECHO 根目录）",
+                             description="一场会议一个 DSH 会话（纪要/分段/归档共用），下一场新建；"
+                                         "这些会话都会登记进这个目录对应的 DSH 工作区，"
+                                         "从而归入侧栏的「会议工作区」分组。"
+                                         "{ECHO} = ECHO 根目录；留空 = 用固定的纪要会话（不分组）",
                              value_type="str"),
     # ---------- 纪要归档（工作日志 / 笔记库）----------
     # 设计：ECHO 只负责"把材料备齐 + 定位笔记库"，至于写到哪个目录、日志长什么样、
@@ -208,6 +243,23 @@ DEFAULTS = {
     "dshPackageDir":   dict(value="", grp="dsh", label="DSH 包目录",
                             description="已弃用：不再由 ECHO 拉起 DSH 进程",
                             value_type="str", deprecated=True),
+    # ---------- 智能体（ECHO 对接哪个产品来执行命令/出纪要）----------
+    # 本分组的展示完全由面板的"智能体表格"接管（见 web/app.js renderAgentTable）：
+    #   * agentBackend = 当前选中哪个产品（单选语义由表格的互斥开关维护），
+    #                    仍由注册表 active_name() 读取，但不作为表单行展示；
+    #   * agentCustomPath = CLI 类产品的可执行文件路径，在表格展开区里渲染。
+    # 三者都 hidden=True：不进 /api/settings 的 settings 列表，只走 agents 字段与本行内联。
+    "agentBackend": dict(value="dsh", grp="agent", label="执行智能体",
+                         description="ECHO 把命令与会议纪要交给哪个智能体执行；"
+                                     "在面板的智能体表格里切换。默认 DSH",
+                         value_type="str", options=["dsh", "codebuddy"], hidden=True),
+    "agentCodebuddyEnabled": dict(value=True, grp="agent", label="启用 CodeBuddy Code",
+                                  description="腾讯 CodeBuddy Code（WorkBuddy 内置同一引擎）",
+                                  value_type="bool", agent_key="codebuddy", hidden=True),
+    "agentCustomPath": dict(value="", grp="agent", label="CLI 路径",
+                            description="可执行文件路径；留空 = 自动探测"
+                                        "（PATH → WorkBuddy 内置目录）。仅在自动探测失败时需要填",
+                            value_type="str", hidden=True),
     # ---------- 面板 ----------
     "panelAutoRefresh": dict(value=3, grp="panel", label="面板自动刷新秒",
                              description="仪表盘轮询间隔（0=关闭）", value_type="int"),
@@ -253,6 +305,10 @@ DEFAULT_MIGRATIONS = {
     "panelOpenMode": ("app", "sidebar"),
     # 2026-09-12：极简回复要求文案 V1（详情留会话）→ V2（先结论 + 换行详情）
     "minimalReplyHint": (_MINIMAL_REPLY_HINT_V1, _MINIMAL_REPLY_HINT_V2),
+    # 2026-09-15：会议工作区默认值从「空（用固定纪要会话）」改为 ECHO 自己的
+    # data/meetings 目录——因为 DSH 侧栏分组是显式登记制，只有指定了工作区目录
+    # 才能把每场会议的会话登记进「会议工作区」。仅当用户从没改过（仍为空）才改写。
+    "meetingWorkspace": ("", "{ECHO}/data/meetings"),
 }
 
 
@@ -266,7 +322,7 @@ class Settings:
         if self._cache is None:
             self._cache = {}
             for k, meta in DEFAULTS.items():
-                self._cache[k] = db.get_setting(k, meta["value"])
+                self._cache[k] = expand_path(db.get_setting(k, meta["value"]))
         return self._cache
 
     def seed_defaults(self):
@@ -302,12 +358,19 @@ class Settings:
     def all(self):
         """合并 DB 元数据与当前值，返回面板可直接渲染的列表。
 
-        已弃用项（DEFAULTS[key]["deprecated"] 为真）在这里被剔除：
-        面板与 /api/settings 都不再看到它们；值仍留在库里，get() 依然可读。
+        被剔除的项（面板与 /api/settings 都看不到，但值仍留在库里、get() 依然可读）：
+          * deprecated=True —— 已弃用的历史配置；
+          * hidden=True     —— 由面板自定义 UI 承载的配置（例如「智能体」分组
+                               改由智能体表格渲染，就不再作为普通表单行出现）。
         """
         rows = db.all_settings()
-        return [r for r in rows
-                if not DEFAULTS.get(r["key"], {}).get("deprecated")]
+        out = []
+        for r in rows:
+            meta = DEFAULTS.get(r["key"], {})
+            if meta.get("deprecated") or meta.get("hidden"):
+                continue
+            out.append(r)
+        return out
 
     def deprecated_keys(self):
         """已弃用的配置键（供诊断/清理脚本使用）。"""

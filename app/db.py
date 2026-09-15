@@ -213,6 +213,18 @@ MIGRATIONS = [
     # 2: api_keys 从「明文 token」改为「sha256(token)」。SQL 部分留空，转换由
     #    _migrate_api_keys_hash 在 Python 里做（SQLite 没有 sha256 函数）。
     (2, ""),
+    # 3: 会议 ↔ DSH 会话映射。一场会议共用一个会话（纪要/分段/语义分段/归档
+    #    都发进它），下一场会议新建。落库是为了让归档环节（worklog）也能复用
+    #    同一会话，并且 ECHO 重启后映射不丢。
+    (3, """
+    CREATE TABLE IF NOT EXISTS meeting_sessions (
+      meeting_id   TEXT PRIMARY KEY,          -- meetings.name（如 2026-09-15_10-07-25）
+      session_id   TEXT DEFAULT '',           -- DSH 侧 sessionId
+      workspace_id TEXT DEFAULT '',           -- 所属 DSH 工作区 id（归档/诊断用）
+      created_at   TEXT DEFAULT (datetime('now','localtime')),
+      last_used_at TEXT DEFAULT ''
+    );
+    """),
 ]
 
 # 需要 Python 参与的迁移：版本号 → callable(conn)，在对应版本的 SQL 之后执行
@@ -349,14 +361,25 @@ def all_settings():
 
 
 def upsert_settings(mapping):
-    """批量更新（仅更新 value，不覆盖元数据）。"""
+    """批量更新设置值（保留既有元数据；缺失的行补建）。
+
+    为什么不能只写 UPDATE：`Settings.update()` 走这里，而面板可能在
+    `seed_defaults()` 之前就写入某个键（新增配置项、或在旧库里改一项从未落库的
+    配置）——只 UPDATE 时库里没有该行，更新会**静默丢失**，表现为"保存了但没生效"
+    （2026-09-15 实测踩到：新增 commandWorkspace 后写入无效）。
+    因此这里改成 INSERT ... ON CONFLICT，行不存在时补建，且**不覆盖已有元数据**
+    （grp/label/description/value_type/options 只在插入时给默认值）。
+    """
     with _write_lock:
         conn = get_conn()
         try:
             for k, v in mapping.items():
                 conn.execute(
-                    "UPDATE settings SET value=?, updated_at=datetime('now','localtime') WHERE key=?",
-                    (_json_dumps(v), k))
+                    "INSERT INTO settings(key,value,grp,label,description,value_type,options,updated_at) "
+                    "VALUES(?,?,'general','','','str','[]',datetime('now','localtime')) "
+                    "ON CONFLICT(key) DO UPDATE SET value=excluded.value, "
+                    "updated_at=datetime('now','localtime')",
+                    (k, _json_dumps(v)))
             conn.commit()
         finally:
             conn.close()
@@ -423,6 +446,31 @@ def list_sessions():
 
 def touch_session(kind):
     _exec("UPDATE dsh_sessions SET last_used_at=datetime('now','localtime') WHERE kind=?", (kind,))
+
+
+# ------------------------------------------------------- meeting_sessions
+# 一场会议一个 DSH 会话（纪要/分段/语义分段/归档共用），下一场会议新建。
+
+def upsert_meeting_session(meeting_id, session_id, workspace_id=""):
+    _exec(
+        "INSERT INTO meeting_sessions(meeting_id,session_id,workspace_id,last_used_at) "
+        "VALUES(?,?,?,datetime('now','localtime')) "
+        "ON CONFLICT(meeting_id) DO UPDATE SET session_id=excluded.session_id, "
+        "workspace_id=excluded.workspace_id, last_used_at=datetime('now','localtime')",
+        (meeting_id, session_id, workspace_id))
+
+
+def get_meeting_session(meeting_id):
+    return _query_one("SELECT * FROM meeting_sessions WHERE meeting_id=?", (meeting_id,))
+
+
+def touch_meeting_session(meeting_id):
+    _exec("UPDATE meeting_sessions SET last_used_at=datetime('now','localtime') "
+          "WHERE meeting_id=?", (meeting_id,))
+
+
+def delete_meeting_session(meeting_id):
+    _exec("DELETE FROM meeting_sessions WHERE meeting_id=?", (meeting_id,))
 
 
 # ---------------------------------------------------------------- meetings

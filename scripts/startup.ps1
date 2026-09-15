@@ -1,4 +1,4 @@
-﻿# startup.ps1 - logon entry point for ECHO (Startup shortcut runs this).
+# startup.ps1 - logon entry point for ECHO (Startup shortcut runs this).
 #
 # Goal: ECHO must come up on its own at every logon and must NOT depend on DSH
 # Desktop or on the echo-host plugin. A DSH Desktop upgrade then never requires
@@ -7,7 +7,7 @@
 #
 # What it does, in order:
 #   1. self-heal the DSH plugin registration (idempotent, quiet, best-effort)
-#   2. start ECHO if port 8970 is not listening
+#   2. start ECHO if its port (ECHO_PORT / data\echo-port.txt) is not listening
 #   3. supervise: restart ECHO whenever it stops listening (resident loop)
 #
 # ASCII-ONLY ON PURPOSE. Windows PowerShell 5.1 parses a BOM-less .ps1 as ANSI/GBK,
@@ -74,6 +74,24 @@ if (-not (Test-Path $pyw)) { SupLog "pythonw missing: $pyw"; exit 1 }
 $outLog = Join-Path $logDir 'echo-server.log'
 $errLog = "$outLog.err"
 
+# ECHO port: ECHO_PORT env -> data\echo-port.txt -> 8970.
+# Hardcoding 8970 was a real bug (2026-09-15): once the port moved to 18060 the probe
+# below could never see the live ECHO, so the supervisor spawned a duplicate instance
+# every ~80s for hours (each duplicate exits on ECHO's own anti-duplicate guard).
+# Resolution order matches scripts\launch-desktop.ps1, which was fixed when the
+# hardcoded port was removed; this file was missed.
+function Resolve-EchoPort([string]$root) {
+    if ($env:ECHO_PORT) { try { if ([int]$env:ECHO_PORT -gt 0) { return [int]$env:ECHO_PORT } } catch { } }
+    $f = Join-Path $root 'data\echo-port.txt'
+    if (Test-Path $f) {
+        try {
+            $v = (Get-Content $f -Raw -ErrorAction Stop).Trim()
+            if ([int]$v -gt 0) { return [int]$v }
+        } catch { }
+    }
+    return 8970
+}
+
 function Test-EchoPort([int]$port = 8970) {
     $c = New-Object System.Net.Sockets.TcpClient
     try {
@@ -94,11 +112,14 @@ function Start-EchoOnce {
     return $p
 }
 
-if (Test-EchoPort) { SupLog "ECHO already listening on 8970" }
+$echoPort = Resolve-EchoPort $root
+SupLog "resolved ECHO port=$echoPort"
+
+if (Test-EchoPort $echoPort) { SupLog "ECHO already listening on $echoPort" }
 else { SupLog "ECHO not listening at logon - starting" }
 
 while ($true) {
-    if (Test-EchoPort) { Start-Sleep -Seconds 15; continue }
+    if (Test-EchoPort $echoPort) { Start-Sleep -Seconds 15; continue }
     SupLog "ECHO not listening - starting"
     try {
         $p = Start-EchoOnce
@@ -108,9 +129,9 @@ while ($true) {
     }
     for ($i = 0; $i -lt 30; $i++) {
         Start-Sleep -Seconds 1
-        if (Test-EchoPort) { break }
+        if (Test-EchoPort $echoPort) { break }
     }
-    if (-not (Test-EchoPort)) {
+    if (-not (Test-EchoPort $echoPort)) {
         SupLog "still not listening after 30s - retry in ${RestartDelaySeconds}s"
         Start-Sleep -Seconds $RestartDelaySeconds
     }

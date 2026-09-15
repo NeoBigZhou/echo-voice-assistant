@@ -13,8 +13,14 @@ ECHO 在这个环节**不做任何归档决策**，只负责三件事：
 所以 ECHO 代码里不再出现任何个人笔记库路径、专项清单或单位会议体系，
 第三方用户只要写好自己的归档技能，改两个设置就能用。
 
-DSH 会话的 cwd 设为笔记库根目录，因此技能里可以直接用相对路径
-（如 `01-工作日志/2026-09-12.md`）。
+会话与工作目录（2026-09-15 定稿：一场会议一个会话）
+--------------------------------------------------
+归档复用**本场会议的纪要会话**（见 db.meeting_sessions），使同一场会议的
+纪要/分段/归档消息都在同一个会话里，并在 DSH 侧栏正确归入会议工作区。
+提示词里给的是 `{vault}` 与 `{md_path}` 的**绝对路径**，所以不依赖会话的工作
+目录，技能照常能完成归档。
+（老会议若没有登记会话，兜底会在笔记库目录新建一个会话；那种会话会落到
+DSH 的「未分组」，仅作兼容。）
 """
 import os
 
@@ -127,7 +133,13 @@ def render_prompt(meeting, note_path, archive_hint="", date_str="", hour=None):
 # ---------------------------------------------------------------- 委派执行
 
 def delegate_archive(meeting, note_path, archive_hint="", date_str="", hour=None):
-    """把归档任务送进 DSH（cwd=笔记库），等技能做完，返回 (ok, 人话结果)。
+    """把归档任务送进 DSH，等技能做完，返回 (ok, 人话结果)。
+
+    会话选择（2026-09-15 定稿：一场会议一个会话）：
+      优先复用本场会议的纪要会话（db.meeting_sessions 里登记的），这样归档消息
+      也落在同一场会议的会话里，与会话分组一致；
+      只有在拿不到该会话时（老会议 / 已归档）才退回"笔记库目录新建会话"。
+      —— 注意：那种老方式建在笔记库目录下，会落到 DSH 的「未分组」，仅作兜底。
 
     不做任何结果解析：技能回什么就带什么给面板。
     """
@@ -135,11 +147,26 @@ def delegate_archive(meeting, note_path, archive_hint="", date_str="", hour=None
                            date_str=date_str, hour=hour)
     if not prompt:
         return False, "归档提示词为空（设置 → 纪要归档 → 归档提示词模板）"
+    client = get_client()
     try:
-        client = get_client()
-        sid = client.create_session(cwd=vault_root())
+        # ① 复用本场会议的会话（与纪要同一会话）
+        sid = ""
+        try:
+            row = db.get_meeting_session(meeting.get("name", ""))
+            if row and row.get("session_id"):
+                sid = row["session_id"]
+        except Exception:
+            sid = ""
+        reused = bool(sid)
+        if not reused:
+            # ② 兜底：在笔记库目录新建（会落到未分组）
+            sid = client.create_session(cwd=vault_root())
+            db.add_log("warn", "meeting",
+                       "本场会议没有可用会话，归档改为在笔记库目录新建会话"
+                       "（该会话会落在 DSH 未分组）")
         if not sid:
             return False, "创建归档会话失败（DSH 未就绪？）"
+        client.clear_stuck(sid)
         client.prompt(sid, prompt, mode="queue")
         reply, _done = client.wait_for_reply(sid, timeout=ARCHIVE_TIMEOUT, poll=2)
     except Exception as e:
@@ -148,5 +175,6 @@ def delegate_archive(meeting, note_path, archive_hint="", date_str="", hour=None
     result = (reply or "").strip()
     if not result:
         return False, "归档技能未返回结果（可能超时，详见服务日志）"
-    db.add_log("info", "meeting", f"归档委派完成：{result[:200]}")
+    db.add_log("info", "meeting",
+               f"归档委派完成（{'复用会议会话' if reused else '新建兜底会话'} {sid}）：{result[:200]}")
     return True, result
