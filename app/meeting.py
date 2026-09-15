@@ -334,8 +334,7 @@ def _fallback_sv_rows(sv, wmodel, seg_path, seg_idx, seg_min, cfg):
     """回退路径：whisper 时间戳骨架 + SenseVoice 文本字符级对齐切句（保留句级时间戳）。"""
     wsegs = []
     try:
-        out, _info = wmodel.transcribe(seg_path, language=cfg.get("sttLanguage", "zh"),
-                                       vad_filter=True, beam_size=5)
+        out, _info = stt_mod.transcribe_whisper(wmodel, seg_path, cfg.get("sttLanguage", "zh"))
         wsegs = [(s.start, s.end, s.text.strip()) for s in out]
     except Exception as e:
         print("whisper 时间戳骨架失败:", e, file=sys.stderr)
@@ -436,8 +435,7 @@ def _transcribe_impl(folder):
                 seg_rows = _fallback_sv_rows(sv, wmodel, seg_path, seg_idx, seg_min, cfg)
         else:
             try:
-                out, _info = wmodel.transcribe(seg_path, language=cfg.get("sttLanguage", "zh"),
-                                               vad_filter=True, beam_size=5)
+                out, _info = stt_mod.transcribe_whisper(wmodel, seg_path, cfg.get("sttLanguage", "zh"))
                 seg_rows = [(seg_idx, s.start, s.end, s.text.strip()) for s in out]
             except Exception as e:
                 print("转写失败:", e, file=sys.stderr)

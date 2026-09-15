@@ -130,12 +130,17 @@ echo-voice-assistant/
 |---|---|
 | `sttModel` | 命令转写引擎：`sensevoice`（默认）/ `qwen3asr` / `sherpa` / `tiny`…`large`（whisper 档） |
 | `meetingSttModel` | 会议转写引擎（可与命令不同） |
+| `sttLanguage` | 转写语言（命令与会议共用）：`zh`（默认）/ `en` / `ja` / `ko` / `yue` / `auto`（自动识别）。Whisper 只认 ISO 码，填全名（如 `Chinese`）会自动纠正，非法值回退 `zh` |
 | `wakeHotkey` / `fallbackHotkey` / `panelHotkey` | 说话 / 备用 / 面板热键 |
 | `panelOpenMode` | `sidebar`（右缘边条）/ `app` / `browser` |
 | `ttsEngine` | `auto` / `edge-tts` / `sapi` / `off` |
 | `minimalReply*` | 「先结论、后详情」的提示词与字数上限 |
 | `worklogEnabled` / `worklogVaultRoot` / `worklogMode` | 纪要归档：把归档委派给你自己的技能（见 [docs/worklog.md](docs/worklog.md)） |
 | `apiAuthEnabled` | 开启后除 `/api/status` 外都需要 `Authorization: Bearer <token>` |
+
+> ⚠️ **Whisper 系列的中文可能输出繁体字**（它的中文训练语料以繁体为主，与语言参数无关）：
+> ECHO 已用简体提示词诱导，且命令 / 会议 / 对外 API 三条路径一致（2026-09-15 修）；
+> 若仍出现繁体，把引擎换成 `sensevoice`（默认）或 `qwen3asr` 即可。
 
 ## 模型路由（ECHO AUTO）
 

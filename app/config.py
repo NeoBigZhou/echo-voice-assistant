@@ -106,8 +106,11 @@ DEFAULTS = {
                             description="sensevoice 最快（中文短命令），qwen3asr 更准（需下载模型），sherpa 流式，whisper 模型按名",
                             value_type="str",
                             options=["sensevoice", "qwen3asr", "sherpa", "tiny", "base", "small", "medium", "large"]),
-    "sttLanguage":     dict(value="zh", grp="voice", label="命令语言", description="转写语言代码",
-                            value_type="str"),
+    "sttLanguage":     dict(value="zh", grp="voice", label="转写语言",
+                            description="命令与会议共用的转写语言：zh/en/ja/ko/yue，或 auto 自动识别。"
+                                        "填全名（如 Chinese）会自动纠正；非法值回退 zh（Whisper 只认 ISO 码，"
+                                        "填错会让转写结果变空）",
+                            value_type="str", options=["zh", "en", "ja", "ko", "yue", "auto"]),
     "triggerKeys":     dict(value=["vol_up"], grp="voice", label="媒体键触发",
                             description="耳机/键盘媒体键作为说话快捷键（vol_up/play_pause/next/prev）",
                             value_type="list", options=["vol_up", "vol_down", "play_pause", "next", "prev"]),
