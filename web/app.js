@@ -1036,8 +1036,7 @@ $("#btnRestartEcho").addEventListener("click", async (e) => {
 /* ---------------- 设置 → 模型：清单 + 下载 ----------------
    清单来自 /api/models（app/modelinfo.py）：显示名可随便起，但"落地路径"是代码约定、
    改了加载器就找不到模型，所以路径在界面上原样展示、不翻译。
-   下载只对上游有稳定源的三类开放（sensevoice / whisper 各档 / qwen3asr）；
-   sherpa、pyannote、唤醒词只能从源机拷贝，界面只给复制说明。 */
+   pyannote 仅提供可复制的下载命令；source=copy 的模型保留拷贝说明。 */
 let _modelJobs = {};
 let _modelPoll = null;
 
@@ -1056,23 +1055,28 @@ function renderModelList(items, jobs) {
     const job = _modelJobs[m.id] || {};
     const running = job.status === "running";
     const failed = job.status === "failed";
-    const downloadable = m.source !== "copy";
+    const downloadable = m.source !== "copy" && m.downloadable !== false;
     const badge = running ? `<span class="badge running">下载中 ${job.percent || 0}%</span>`
-      : (m.ready ? `<span class="badge online">已就绪</span>` : `<span class="badge idle">未安装</span>`);
+      : (m.ready ? `<span class="badge online">${m.id === "pyannote" ? "模型已下载" : "已就绪"}</span>` : `<span class="badge idle">未安装</span>`);
     const size = `${m.size}${m.local_mb ? `（本地 ${fmtMb(m.local_mb)}）` : ""}`;
     const btns = [];
     if (downloadable) {
       btns.push(`<button class="btn mini" data-dl="${esc(m.id)}" data-force="${m.ready ? "1" : "0"}" `
         + `${running || (_modelJobs.__active && !failed) ? "disabled" : ""}>`
-        + (running ? `下载中 ${job.percent || 0}%` : (failed ? "重试" : (m.ready ? "重新下载" : "下载"))) + `</button>`);
+        + (running ? `下载中 ${job.percent || 0}%` : (failed ? "重试" : (m.ready ? "重新下载" : esc(m.download_label || "下载")))) + `</button>`);
     }
-    if (m.cmd) btns.push(`<button class="btn mini" data-copy="${esc(m.cmd)}">复制命令</button>`);
+    if (m.cmd) btns.push(`<button class="btn mini" data-copy="${esc(m.cmd)}">${esc(m.cmd_label || "复制命令")}</button>`);
+    for (const link of (m.links || [])) {
+      if (link.url.startsWith("https://huggingface.co/"))
+        btns.push(`<a class="btn mini" href="${esc(link.url)}" target="_blank" rel="noopener noreferrer">${esc(link.label)}</a>`);
+    }
     if (m.source === "copy") btns.push(`<button class="btn mini" data-copy="${esc(m.target)}">复制目标路径</button>`);
     return `<div class="model-row${m.ready ? " ok" : ""}">
       <div class="m-head"><span class="m-name">${esc(m.name)}</span>${badge}</div>
       <div class="m-meta">${esc(m.purpose)} · ${esc(size)}</div>
       <div class="m-path" title="落地路径（代码约定，不要改名）">${esc(m.target)}</div>
       <div class="m-how">${esc(m.how)}</div>
+      ${m.cmd_label === "复制下载命令" ? `<details class="m-how"><summary>查看下载命令</summary><pre style="white-space:pre-wrap;overflow-wrap:anywhere;user-select:text">${esc(m.cmd)}</pre></details>` : ""}
       ${running ? `<div class="m-bar"><i style="width:${Math.max(3, job.percent || 0)}%"></i></div>` : ""}
       ${failed ? `<div class="m-how" style="color:var(--red)">${esc(job.message || "下载失败")}</div>` : ""}
       <div class="m-actions">${btns.join("")}</div>

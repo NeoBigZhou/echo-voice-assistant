@@ -56,3 +56,4 @@ desktop.ini
 # ---- .NET 边条构建产物：只入库源码 ----
 sidebar/bin/
 sidebar/obj/
+mac/sidebar/build/

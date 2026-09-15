@@ -6,7 +6,7 @@ restart_echo/toggle_sidebar/autostart_sidebar/open_panel_window/start_all/stop_a
 app.boot / app.api / app.main 无需任何改动。
 
 差异：
-  * 没有右缘边条（Windows .NET 程序）→ 一律用浏览器打开面板
+  * 原生 AppKit / WKWebView 右缘边条，未构建时退回浏览器
   * 重启走 mac/restart_mac.sh（不再是 powershell）
   * 唤醒沿用跨平台的 app.audio.wake.WakeListener
 """
@@ -30,26 +30,56 @@ _panel_last_open = 0.0
 
 
 def sidebar_exe_path():
-    """macOS 没有 Windows 边条程序。"""
-    return None
+    path = os.path.join(BASE_DIR, "mac", "sidebar", "build", "ECHO Sidebar.app",
+                        "Contents", "MacOS", "echo-sidebar")
+    return path if os.path.isfile(path) and os.access(path, os.X_OK) else None
+
+
+def _spawn_sidebar(command):
+    exe = sidebar_exe_path()
+    if not exe:
+        return False
+    log_dir = os.path.join(BASE_DIR, "data", "logs")
+    os.makedirs(log_dir, exist_ok=True)
+    try:
+        with open(os.path.join(log_dir, "sidebar-mac.log"), "ab") as log:
+            subprocess.Popen(
+                [exe, "--port", str(int(settings.get("serverPort", 8970))),
+                 "--command", command], cwd=BASE_DIR,
+                stdin=subprocess.DEVNULL, stdout=log, stderr=log,
+                start_new_session=True,
+            )
+        return True
+    except OSError as exc:
+        print(f"[mac] 浮动框启动失败: {exc}")
+        return False
 
 
 def toggle_sidebar():
-    """Mac 上“边条”不存在 → 退化为打开面板。"""
-    return open_panel_window()
+    if settings.get("panelOpenMode", "sidebar") == "sidebar" and _spawn_sidebar("toggle"):
+        return True
+    return _open_browser()
 
 
 def autostart_sidebar():
-    """macOS 没有 Windows 右缘边条，启动时不弹面板。
-
-    「启动时自动显示折叠条」（panelAutoStart）按定义只在 panelOpenMode=sidebar 时生效，
-    而 mac 上 panelOpenMode 固定为 browser（见 run_mac.py），所以这里保持静默；
-    用户要面板用 panelHotkey（默认 Ctrl+Shift+E）或直接开浏览器。
-    """
-    return "skip: macOS 无右缘边条（panelOpenMode=browser）"
+    if settings.get("panelOpenMode", "sidebar") != "sidebar":
+        return "skip: panelOpenMode != sidebar"
+    if not settings.get("panelAutoStart", True):
+        return "skip: panelAutoStart=False"
+    # Both startup commands are idempotent for an already running host.
+    command = "collapsed" if settings.get("panelStartCollapsed", True) else "expanded"
+    if _spawn_sidebar(command):
+        return "macOS 浮动框已启动"
+    return "skip: 请先运行 bash mac/build_sidebar.sh 构建浮动框"
 
 
 def open_panel_window():
+    if settings.get("panelOpenMode", "sidebar") == "sidebar" and _spawn_sidebar("expand"):
+        return True
+    return _open_browser()
+
+
+def _open_browser():
     """用系统默认浏览器打开 ECHO 面板（1.5 秒防抖）。"""
     global _panel_last_open
     now = time.time()
@@ -97,7 +127,7 @@ def _hotkey_cb(source, detail):
     """与 Windows 版语义一致：panelHotkey → 开面板；其余 → 录音命令流。"""
     if source == "hotkey":
         if detail == "panelHotkey":
-            open_panel_window()
+            toggle_sidebar()
         else:
             assistant.capture("hotkey")
     elif source == "mediakey":

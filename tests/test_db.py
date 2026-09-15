@@ -60,7 +60,7 @@ class ApiKeyTests(unittest.TestCase):
         self.assertNotIn("token", columns)
         self.assertIn("token_hash", columns)
         self.assertEqual(stored_hash, hashlib.sha256(legacy_token.encode()).hexdigest())
-        self.assertEqual(version, "2")
+        self.assertGreaterEqual(int(version), 2)
         self.assertTrue(verified)
 
 

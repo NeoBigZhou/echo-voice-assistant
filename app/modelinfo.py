@@ -16,6 +16,7 @@
 ModelScope 缓存固定在 ~/.cache/modelscope/models（funasr 不认识中文路径，所以不放仓库里）。
 """
 import os
+import shlex
 import threading
 import time
 
@@ -107,10 +108,30 @@ def _ready_kws():
 
 
 def _ready_pyannote():
-    """diarize.py 的三个本地目录（-local = 不发 HF 请求）。"""
-    p = os.path.join(MODELS_DIR, "pyannote")
-    return (os.path.isdir(os.path.join(p, "pyannote-segmentation-3.0-local"))
-            and os.path.isdir(os.path.join(p, "pyannote-wespeaker-local")))
+    """空目录不能代表模型已下载；校验加载器需要的实际文件。"""
+    from scripts.install_pyannote import ASSETS
+    return all(os.path.isfile(os.path.join(MODELS_DIR, "pyannote", folder, filename))
+               and os.path.getsize(os.path.join(MODELS_DIR, "pyannote", folder, filename)) > 0
+               for _, folder, filename in ASSETS)
+
+
+def _pyannote_command():
+    from scripts.install_pyannote import ASSETS
+    hf = os.path.join(BASE_DIR, "venv", "Scripts" if os.name == "nt" else "bin",
+                      "hf.exe" if os.name == "nt" else "hf")
+    lines = []
+    if os.name == "nt":
+        lines.append("$env:HF_ENDPOINT = 'https://huggingface.co'")
+        lines.append("$env:HF_HUB_OFFLINE = '0'")
+    for repo, folder, filename in ASSETS:
+        args = [hf, "download", repo, filename, "--local-dir",
+                os.path.join(BASE_DIR, "models", "pyannote", folder)]
+        if os.name == "nt":
+            lines.append("& " + " ".join("'" + p.replace("'", "''") + "'" for p in args))
+            lines.append("if ($LASTEXITCODE -ne 0) { throw '模型下载失败，请检查授权与网络' }")
+        else:
+            lines.append("HF_ENDPOINT=https://huggingface.co HF_HUB_OFFLINE=0 " + shlex.join(args))
+    return "\n".join(lines) if os.name == "nt" else " &&\n".join(lines)
 
 
 def _ready_qwen(model_id):
@@ -157,10 +178,15 @@ for _n in ("tiny", "base", "small", "medium", "large-v3"):
 
 CATALOG += [
     dict(id="pyannote", group="可选功能", name="说话人分离（pyannote 三件套）",
-         purpose="会议纪要区分说话人（设置里默认关闭）", size="~31 MB",
+         purpose="会议纪要区分说话人（设置里默认关闭）", size="模型与 PyTorch 等依赖需额外磁盘空间",
          target="models/pyannote/{pyannote-segmentation-3.0-local, pyannote-wespeaker-local, pyannote-plda-local}",
-         source="copy", ref="pyannote/segmentation-3.0 + wespeaker-voxceleb-resnet34-LM",
-         how="只能拷贝：diarize.py 从本地目录加载、不发 HuggingFace 请求；把源机的三个 -local 目录原样拷过来（plda 目录即使为空也要保留）。"),
+         source="script", ref="pyannote/segmentation-3.0 + wespeaker-voxceleb-resnet34-LM",
+         cmd=_pyannote_command(), cmd_label="复制下载命令", downloadable=False,
+         links=[{"label": "分段模型授权", "url": "https://huggingface.co/pyannote/segmentation-3.0"},
+                {"label": "PLDA 模型授权", "url": "https://huggingface.co/pyannote/speaker-diarization-community-1"}],
+         how="首次需在官方页面同意使用条件，并通过 hf auth login 登录（只读 Token）。"
+             "复制下方命令到终端自行执行，即可将所需文件下载到对应目录。"
+             "命令仅下载模型；使用说话人分离还需安装 pyannote.audio 4.x 与 speechbrain 依赖。"),
 
     dict(id="kws", group="可选功能", name="唤醒词 KWS（kws-zh-en-3m）",
          purpose="语音唤醒（设置里默认关闭）", size="~39 MB",
@@ -230,9 +256,7 @@ def inventory():
 
 
 # ---------------------------------------------------------------- 下载（面板按钮）
-# 只对"上游有稳定下载源"的三类开放：sensevoice / whisper 各档 / qwen3asr。
-# sherpa、pyannote、唤醒词 KWS 上游要么需要 HF 授权、要么只在 GitHub release 上，
-# 内网不稳，保持"从源机拷贝"，按钮只给复制说明。
+# pyannote 仅提供可复制的官方下载命令，由用户在终端执行。
 _EXPECTED_MB = {"sensevoice": 900, "qwen3asr": 3600, "sherpa": 190,
                 "whisper-tiny": 75, "whisper-base": 141, "whisper-small": 464,
                 "whisper-medium": 1500, "whisper-large-v3": 2950}
@@ -353,6 +377,8 @@ def start_download(mid, force=False):
     entry = _by_id(mid)
     if not entry:
         return False, f"未知模型: {mid}"
+    if entry.get("downloadable") is False:
+        return False, "请复制下载命令，在终端自行执行。"
     if entry.get("source") == "copy":
         return False, "该模型没有稳定的公开下载源，请从源机拷贝（见说明）"
     if not force:

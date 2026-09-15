@@ -344,8 +344,8 @@ def get_models(_auth=Depends(optional_auth)):
 def post_model_download(body: ModelDownloadIn, _auth=Depends(optional_auth)):
     """下载指定模型（后台线程，立即返回；进度用 GET /api/models 轮询）。
 
-    只有上游有稳定下载源的才开放（sensevoice / whisper 各档 / qwen3asr）；
-    sherpa、pyannote、唤醒词 KWS 需要从源机拷贝，这里会直接拒绝并说明。
+    pyannote 只提供复制命令，不支持从此接口触发下载。
+    source=copy 的模型仍返回拷贝说明。
     """
     from app import modelinfo
     ok, msg = modelinfo.start_download(body.id.strip(), force=bool(body.force))

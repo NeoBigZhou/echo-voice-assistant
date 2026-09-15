@@ -30,6 +30,12 @@ echo "==> 安装依赖（首次较慢，请耐心等待）"
 
 mkdir -p data/logs
 
+if xcrun --find swiftc >/dev/null 2>&1; then
+  bash mac/build_sidebar.sh || echo "浮动框构建失败，可继续使用浏览器面板。"
+else
+  echo "可选：安装 Apple Command Line Tools 后运行 bash mac/build_sidebar.sh，启用原生浮动框。"
+fi
+
 echo ""
 echo "✅ 安装完成！"
 echo "   启动：  mac/start_mac.sh"
