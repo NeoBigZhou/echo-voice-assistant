@@ -37,8 +37,6 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DATA_DIR = os.path.join(os.path.dirname(BASE_DIR), "data")
 DB_FILE = os.path.join(DATA_DIR, "echo.db")
 
-SCHEMA_VERSION = 2
-
 
 def _hash_token(token: str) -> str:
     """API 密钥的存储形态：sha256(token)。
@@ -716,9 +714,8 @@ def delete_voiceprints_by_name(name):
     _exec("DELETE FROM voiceprints WHERE name=?", (str(name).strip(),))
 
 
-def delete_voiceprints_by_source(meeting_name, source_label):
-    _exec("DELETE FROM voiceprints WHERE meeting_name=? AND source_label=?",
-          (meeting_name, source_label))
+# 注：曾有 delete_voiceprints_by_source(meeting_name, source_label)——无调用方，已于 2026-09-15 删除。
+# 删会议保留声纹库是刻意的设计（弱关联），所以不需要它。
 
 
 # ---------------------------------------------------------------- lines

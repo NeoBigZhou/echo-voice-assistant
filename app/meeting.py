@@ -404,6 +404,9 @@ def _transcribe_impl(folder):
     vp_matcher = None
     vp_names = {}
     vp_merges = {}
+    # 声纹判定统计：整场汇总成一行日志 —— 既避免"静默不认人"（真实故障看不出来），
+    # 也是校准阈值/间隔的依据（最高相似度 + 未命中原因分布）。
+    vp_stats = {"tried": 0, "hit": 0, "best": 0.0, "best_name": "", "miss": {}}
     if diarize:
         try:
             from app import voiceprint
@@ -479,8 +482,15 @@ def _transcribe_impl(folder):
                         from app import voiceprint
                         for disp, m in voiceprint.identify(embs, labels, label_map,
                                                            vp_matcher).items():
+                            vp_stats["tried"] += 1
+                            if float(m["sim"]) > vp_stats["best"]:
+                                vp_stats["best"] = float(m["sim"])
+                                vp_stats["best_name"] = m.get("name") or ""
                             if not m["ok"]:
+                                r = m.get("reason") or "?"
+                                vp_stats["miss"][r] = vp_stats["miss"].get(r, 0) + 1
                                 continue
+                            vp_stats["hit"] += 1
                             old = vp_names.get(disp)
                             if old is None:
                                 db.add_log("info", "voiceprint",
@@ -535,6 +545,16 @@ def _transcribe_impl(folder):
                     db.replace_speaker_embeddings(meeting_id, emb_map)
         except Exception as e:
             db.add_log("warn", "voiceprint", f"留存说话人声纹样本失败：{e}")
+
+    if vp_stats["tried"]:
+        # 整场一行汇总：认了没认、最高相似度多少、为什么没认 —— 校准阈值就看这行
+        near = f"，最高相似度 {vp_stats['best']:.2f}"
+        if vp_stats["best_name"]:
+            near += f"（最接近「{vp_stats['best_name']}」）"
+        miss_txt = "，".join(f"{k}×{v}" for k, v in sorted(vp_stats["miss"].items())) or "无"
+        db.add_log("info", "voiceprint",
+                   f"{meeting_name}：声纹判定 {vp_stats['tried']} 次，命中 {vp_stats['hit']} 次"
+                   f"{near}；未命中：{miss_txt}（阈值/间隔可在 设置 → 会议 调整）")
 
     _set_progress(meeting_id, phase="整理结果", seg_index=seg_total, seg_total=seg_total,
                   percent=100, detail="写入数据库与导出转写文件")

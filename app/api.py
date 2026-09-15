@@ -748,6 +748,11 @@ def meeting_file(mid: int, kind: str = "transcript", _auth=Depends(optional_auth
 # ---------------------------------------------------------------- 声纹库（常用联系人）
 # 会议里把说话人改名为联系人即自动入库（voiceprintAutoEnroll）；
 # 库里的样本可在面板「说话人管理」查看/删除，这里是对应的 REST 入口。
+#
+# 返回约定：**业务性失败**（库里没有这个联系人、会议没有声纹样本、开关没开…）一律
+# `HTTP 200 + {"ok": false, "message": "人话原因"}`，与既有的 /api/meeting/start|stop、
+# /api/models/download 等端点保持一致（面板/手机 App/技能都按 ok 字段判成败）；
+# 只有参数校验、鉴权这类框架级错误才走 4xx（FastAPI 校验 422 / optional_auth 的 401）。
 
 @router.get("/voiceprints")
 def get_voiceprints(_auth=Depends(optional_auth)):

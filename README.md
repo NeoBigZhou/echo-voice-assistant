@@ -37,9 +37,12 @@ ECHO 自己**不做推理**，只负责录音、转写、编排、面板与播�
   （需要出网的是"交给大模型"和"默认的在线语音合成"，见上表）。
 - **指令只要一句结论**：提示词要求模型先给极简结论再给详情，语音只念结论，详情留在会话里。
 - **会议纪要**：分段录音、按需/常驻双转写引擎、说话人分离（pyannote）、纪要归档可委派给你自己的技能。
-- **常用联系人声纹**：在会议里把说话人**改名成联系人**（如「张总」）即自动入库；下次会议听到同一个人的
-  声音会自动把 TA 标成联系人名，同一个人被分离成两簇时自动合并（阈值/开关见 设置 → 会议；
-  样本只存本机 `data/echo.db`）。
+- **常用联系人声纹（默认关闭）**：在会议里把说话人**改名成联系人**（如「张总」）即自动入库；下次会议听到同一个人的
+  声音会自动把 TA 标成联系人名，同一个人被分离成两簇时自动合并。**声纹属生物特征数据，默认不开**：
+  到 设置 → 会议 里显式开启（`voiceprintEnabled` / `voiceprintAutoEnroll`）；转写结束后
+  `source=voiceprint` 的日志会给出一行汇总（判定次数 / 命中 / 最高相似度 / 未命中原因），
+  阈值与歧义间隔就照它校准。样本只存本机 `data/echo.db`，可在会议页「说话人管理」里删除；
+  关闭时不留存任何样本。
 - **右缘边条**：**ECHO 启动后自动**在屏幕右缘显示一条 64px 折叠条（录音、电平、说话、状态灯），
   `Ctrl+Shift+E` 展开/收起；不想自动显示可在 设置 → 语音命令 关掉（`panelAutoStart`），
   也可设成"启动即展开面板"（`panelStartCollapsed=false`）。
@@ -139,7 +142,7 @@ echo-voice-assistant/
 | `ttsEngine` | `auto` / `edge-tts` / `sapi` / `off` |
 | `minimalReply*` | 「先结论、后详情」的提示词与字数上限 |
 | `worklogEnabled` / `worklogVaultRoot` / `worklogMode` | 纪要归档：把归档委派给你自己的技能（见 [docs/worklog.md](docs/worklog.md)） |
-| `voiceprintEnabled` / `voiceprintAutoEnroll` / `voiceprintThreshold` / `voiceprintMargin` | 常用联系人声纹：转写时自动认人 / 改名自动入库 / 匹配阈值 / 歧义间隔 |
+| `voiceprintEnabled` / `voiceprintAutoEnroll` / `voiceprintThreshold` / `voiceprintMargin` | 常用联系人声纹（**默认关闭**，生物特征数据）：转写时自动认人 / 改名自动入库 / 匹配阈值 / 歧义间隔 |
 | `apiAuthEnabled` | 开启后除 `/api/status` 外都需要 `Authorization: Bearer <token>` |
 
 > ⚠️ **Whisper 系列的中文可能输出繁体字**（它的中文训练语料以繁体为主，与语言参数无关）：
