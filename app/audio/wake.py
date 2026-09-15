@@ -43,10 +43,10 @@ def _syl_match(a, b):
         return False
     if len(a) == len(b):
         return sum(1 for x, y in zip(a, b) if x != y) <= 1
-    s, l = (a, b) if len(a) < len(b) else (b, a)
+    shorter, longer = (a, b) if len(a) < len(b) else (b, a)
     i = j = diff = 0
-    while i < len(s) and j < len(l):
-        if s[i] != l[j]:
+    while i < len(shorter) and j < len(longer):
+        if shorter[i] != longer[j]:
             diff += 1
             if diff > 1:
                 return False
@@ -54,7 +54,7 @@ def _syl_match(a, b):
         else:
             i += 1
             j += 1
-    return diff + (len(l) - j) <= 1
+    return diff + (len(longer) - j) <= 1
 
 
 def _subseq(needle, haystack):

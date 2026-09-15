@@ -245,18 +245,36 @@ def _sync_settings_text() -> bool:
     # 1) llm-pi-ai: 顶层键
     top = next((i for i, ln in enumerate(lines) if ln.startswith("llm-pi-ai:")), None)
     if top is None:
-        return False
-    # 2) 其下的 providers:
-    prov = None
+        # DSH 首次配置 pi-ai 时还没有这个段。只在文件末尾追加
+        # 我们自己的 provider，不改动现有顶层配置。
+        if lines and lines[-1].strip():
+            lines.append("")
+        lines.extend(["llm-pi-ai:", "  providers:"])
+        lines.extend(_render_block(_route_entry(), indent=4))
+        SETTINGS.write_text("\n".join(lines).rstrip("\n") + "\n", encoding="utf-8")
+        return True
+    section_end = len(lines)
     for i in range(top + 1, len(lines)):
         ln = lines[i]
-        if ln.strip() and indent_of(ln) <= 2 and not ln.lstrip().startswith("#"):
-            if ln.strip().startswith("providers:"):
-                prov = i
-                break
-            return False        # llm-pi-ai 下没有 providers（异常结构，别乱写）
+        if ln.strip() and not ln.lstrip().startswith("#") and indent_of(ln) == 0:
+            section_end = i
+            break
+    # 2) 其下的 providers:
+    prov = None
+    for i in range(top + 1, section_end):
+        ln = lines[i]
+        if (ln.strip() and indent_of(ln) == 2
+                and not ln.lstrip().startswith("#")
+                and ln.strip().startswith("providers:")):
+            prov = i
+            break
     if prov is None:
-        return False
+        # llm-pi-ai 段已存在但还没有 providers：在该段末尾新建，
+        # 保留段内其他选项。
+        block = ["  providers:"] + _render_block(_route_entry(), indent=4) + [""]
+        lines[section_end:section_end] = block
+        SETTINGS.write_text("\n".join(lines).rstrip("\n") + "\n", encoding="utf-8")
+        return True
     # 3) providers 块结束位置
     end = len(lines)
     for i in range(prov + 1, len(lines)):

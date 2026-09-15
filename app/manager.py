@@ -11,9 +11,7 @@ DSH Desktop 2.x 是 ECHO 的执行底层，由桌面客户端自己托管（Web 
 DSH Desktop 升级弃用：其会话与桌面版不互通。
 """
 import os
-import subprocess
 
-import app.db as db
 from app.dsh import get_client
 
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))

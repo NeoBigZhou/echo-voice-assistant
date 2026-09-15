@@ -313,7 +313,7 @@ def _transcribe_meeting(folder):
             _clear_progress(mid)
         services.report_meeting("idle", f"转写完成 {name}")
         _boot_note_meeting_key()
-        _boot_meeting_stt("online", f"转写完成 · 引擎已加载")
+        _boot_meeting_stt("online", "转写完成 · 引擎已加载")
         tts_mod.beep_ok()          # 转写完成提示音（叮叮）
     except Exception as e:
         import traceback

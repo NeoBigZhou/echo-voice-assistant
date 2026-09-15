@@ -7,7 +7,7 @@
 import os
 import tempfile
 
-from fastapi import APIRouter, Depends, File, Form, Header, HTTPException, Request, UploadFile
+from fastapi import APIRouter, Depends, File, Form, Header, HTTPException, UploadFile
 from pydantic import BaseModel
 
 import app.db as db
@@ -16,6 +16,7 @@ from app import assistant, manager, meeting, runtime, services, worklog
 from app.audio import recorder
 from app.audio import stt as stt_mod
 from app.audio import tts as tts_mod
+from app.pathutil import safe_under as _safe_under
 
 router = APIRouter(prefix="/api")
 
@@ -23,7 +24,6 @@ router = APIRouter(prefix="/api")
 # ---------------------------------------------------------------- 音频转 16k wav（外部转写用）
 def _audio_to_wav16k(src_path, dst_path):
     """任意音频（wav/mp3/flac…）→ 16kHz 单声道 PCM wav。"""
-    import numpy as np
     import soundfile as sf
     import soxr
     data, sr = sf.read(src_path, dtype="float32", always_2d=True)
@@ -58,19 +58,6 @@ _MEETING_FILE_KINDS = {"transcript", "topics", "summary"}
 def _meeting_dirname(name) -> str:
     """会议目录名：只取最后一段，杜绝 name 里混入分隔符或 ..（库里的值正常不会）。"""
     return os.path.basename(str(name or "").replace("\\", "/").rstrip("/"))
-
-
-def _safe_under(base: str, *parts):
-    """把 parts 拼到 base 之下，返回绝对路径；一旦逃出 base 就返回 None。
-
-    判定用 realpath（解析掉 .. 与符号链接），并比较 base + 分隔符前缀，
-    避免 "/data/meetings-evil" 这种同前缀旁路。
-    """
-    base_real = os.path.realpath(base)
-    target = os.path.realpath(os.path.join(base_real, *parts))
-    if target == base_real or not target.startswith(base_real + os.sep):
-        return None
-    return target
 
 
 # ---------------------------------------------------------------- 模型
@@ -357,8 +344,8 @@ def get_models(_auth=Depends(optional_auth)):
 def post_model_download(body: ModelDownloadIn, _auth=Depends(optional_auth)):
     """下载指定模型（后台线程，立即返回；进度用 GET /api/models 轮询）。
 
-    只有上游有稳定下载源的才开放（sensevoice / whisper 各档 / qwen3asr）；
-    sherpa、pyannote、唤醒词 KWS 需要从源机拷贝，这里会直接拒绝并说明。
+    pyannote 只提供复制命令，不支持从此接口触发下载。
+    source=copy 的模型仍返回拷贝说明。
     """
     from app import modelinfo
     ok, msg = modelinfo.start_download(body.id.strip(), force=bool(body.force))
@@ -444,6 +431,10 @@ def get_audio_level(_auth=Depends(optional_auth)):
 # ---------------------------------------------------------------- 转写服务（对外 API）
 # 其他应用可上传音频调用本地转写（无需直接操作模型）：
 #   curl -F "file=@a.mp3" -F "engine=qwen3asr" http://127.0.0.1:8970/api/stt/transcribe
+MAX_UPLOAD_BYTES = 512 * 1024 * 1024
+UPLOAD_CHUNK_BYTES = 1024 * 1024
+
+
 async def _save_upload_wav(file: UploadFile):
     """保存上传文件并转成 16k wav 临时文件，返回路径。"""
     import uuid
@@ -453,14 +444,26 @@ async def _save_upload_wav(file: UploadFile):
     suffix = os.path.splitext(file.filename or "")[1] or ".wav"
     tmp_in = os.path.join(tempfile.gettempdir(), f"echo-up{tag}.in{suffix}")
     tmp_wav = os.path.join(tempfile.gettempdir(), f"echo-up{tag}.wav")
-    with open(tmp_in, "wb") as f:
-        f.write(await file.read())
     try:
-        await run_in_threadpool(_audio_to_wav16k, tmp_in, tmp_wav)
+        total = 0
+        with open(tmp_in, "wb") as f:
+            while chunk := await file.read(UPLOAD_CHUNK_BYTES):
+                total += len(chunk)
+                if total > MAX_UPLOAD_BYTES:
+                    raise HTTPException(status_code=413, detail="音频文件不能超过 512 MB")
+                f.write(chunk)
+        try:
+            await run_in_threadpool(_audio_to_wav16k, tmp_in, tmp_wav)
+        except Exception:
+            try:
+                os.remove(tmp_wav)
+            except OSError:
+                pass
+            raise
     finally:
         try:
             os.remove(tmp_in)
-        except Exception:
+        except OSError:
             pass
     return tmp_wav
 

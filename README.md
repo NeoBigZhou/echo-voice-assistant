@@ -90,6 +90,20 @@ powershell -File scripts\start-all.ps1          # 或：一键（含 DSH 检查�
 更细的安装、显卡、非 ASCII 路径、开机自启、边条编译、插件部署见 **[docs/DEPLOY.md](docs/DEPLOY.md)**；
 逐项核对清单见 **[docs/新机器部署指南.md](docs/新机器部署指南.md)**。
 
+### macOS（精简支持）
+
+macOS 使用独立入口，以原生 AppKit / WKWebView 浮动框替代 Windows 边条：
+
+```bash
+mac/setup_mac.sh
+mac/start_mac.sh
+```
+
+支持右缘浮动框、面板、录音转写、会议、桌面通知与 macOS `say` 离线播报；全局热键需要可选依赖 `pynput`。
+浮动框可运行 `bash mac/build_sidebar.sh` 构建（需要 Apple Command Line Tools）；
+旧用户在设置里将 `panelOpenMode` 改为 `sidebar` 后，重启 ECHO 即可随服务启动。
+限制和权限设置见 **[mac/README.md](mac/README.md)**。
+
 ## 目录结构
 
 ```
