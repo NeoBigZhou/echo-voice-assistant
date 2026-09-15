@@ -38,7 +38,7 @@ ECHO 自己**不做推理**，只负责录音、转写、编排、面板与播�
 - **指令只要一句结论**：提示词要求模型先给极简结论再给详情，语音只念结论，详情留在会话里。
 - **会议纪要**：分段录音、按需/常驻双转写引擎、说话人分离（pyannote）、纪要归档可委派给你自己的技能。
 - **右缘边条**：**ECHO 启动后自动**在屏幕右缘显示一条 64px 折叠条（录音、电平、说话、状态灯），
-  `Ctrl+Shift+E` 展开/收起；不想自动显示可在 设置 → 语音与命令 关掉（`panelAutoStart`），
+  `Ctrl+Shift+E` 展开/收起；不想自动显示可在 设置 → 语音命令 关掉（`panelAutoStart`），
   也可设成"启动即展开面板"（`panelStartCollapsed=false`）。
 - **模型路由（ECHO AUTO）**：把多个上游（内网网关 / 公网 API / 任意 OpenAI 兼容端点）组成
   「模型组」，按通道号顺序派发并自动故障转移 + 熔断，DSH 里只需选一个 `ECHO AUTO`
@@ -50,7 +50,7 @@ ECHO 自己**不做推理**，只负责录音、转写、编排、面板与播�
 
 | 层 | 选型 |
 |---|---|
-| 后端 | Python 3.11 + FastAPI + uvicorn（单进程，默认端口 8970） |
+| 后端 | Python 3.11 + FastAPI + uvicorn（单进程；端口默认 8970，可改，权威值见 `data/echo-port.txt`） |
 | 数据库 | SQLite（`data/echo.db`，WAL，版本化迁移） |
 | 转写 | faster-whisper / funasr SenseVoice / Qwen3-ASR / sherpa-onnx（本地模型，自动选 GPU） |
 | 唤醒 | sherpa-onnx KWS（离线关键词，可自定义） |
@@ -58,7 +58,7 @@ ECHO 自己**不做推理**，只负责录音、转写、编排、面板与播�
 | 合成 | edge-tts（在线，自然）→ Windows SAPI（离线兜底） |
 | 面板 | 原生 HTML/CSS/JS SPA（无构建链，响应式，可直接在手机浏览器打开） |
 | 边条 | .NET 7 WinForms + WebView2（`sidebar/`） |
-| 模型路由 | 本机 OpenAI 兼容代理（`dsh-failover/`，默认 `127.0.0.1:8899`）：多上游派发 + 探测 + 熔断 |
+| 模型路由 | 本机 OpenAI 兼容代理（`dsh-failover/`，默认 `127.0.0.1:8899`，可被 `config.json` 的 `port` 覆盖）：多上游派发 + 探测 + 熔断 |
 | 执行层 | DeepSeek Harness Desktop 2.x 本地 API（默认 `http://127.0.0.1:43120`） |
 
 ## 快速开始
@@ -75,7 +75,7 @@ python -m venv venv
 powershell -File scripts\setup.ps1              # 校验 venv/依赖/模型 + 建库（一次性）
 powershell -File scripts\start.ps1 -Background  # 后台启动
 powershell -File scripts\start-all.ps1          # 或：一键（含 DSH 检查）
-# 打开面板：http://127.0.0.1:8970
+# 打开面板：http://127.0.0.1:<端口>（默认 8970；实际端口见 data\echo-port.txt）
 ```
 
 开机自启：`powershell -File scripts\install-autostart.ps1`（卸载加 `-Remove`）。
@@ -83,7 +83,7 @@ powershell -File scripts\start-all.ps1          # 或：一键（含 DSH 检查�
 首次使用建议：
 
 1. 面板 → **设置 → 模型**：点一下把 `SenseVoice`（默认转写引擎，约 896MB）下载好；
-2. 面板 → **设置 → 语音**：确认热键（默认 `Ctrl+Alt+C` 说话、`Ctrl+Shift+E` 面板）；
+2. 面板 → **设置 → 语音命令**：确认热键（默认 `Ctrl+Alt+C` 说话、`Ctrl+Shift+E` 面板）；
 3. 面板 → **启动**：查看各组件状态，缺什么点什么（DSH 执行引擎需要另行安装 DSH Desktop）；
 4. 想在 DSH 里用**模型路由**：面板 → **模型路由** 页签配置通道，再到 DSH 把模型选成 `ECHO AUTO`。
 
@@ -113,9 +113,9 @@ echo-voice-assistant/
 ├── models/         本地模型（不入 git；用面板下载或自行拷贝）
 ├── data/           echo.db、录音、历史、日志（不入 git）
 ├── assets/         提示音等资源
-├── plugin/         DSH Desktop 宿主插件源码（echo-host：托管 ECHO + 右侧仪表盘边条）
+├── plugin/         DSH Desktop 宿主插件源码（echo-host：拉起/守护 ECHO；右缘边条见 sidebar/）
 ├── sidebar/        右缘折叠条/边条宿主（.NET 7 WinForms + WebView2，echo-sidebar.exe）
-├── dsh-failover/   模型路由（本机 8899）：多个上游组成「模型组」，DSH 侧只认 ECHO AUTO
+├── dsh-failover/   模型路由（默认本机 8899，可被 config.json 的 port 覆盖）：多个上游组成「模型组」，DSH 侧只认 ECHO AUTO
 ├── scripts/        setup / start / stop / 自启 / 插件部署 / 一键安装向导
 ├── docs/           部署指南、新机器部署指南、纪要归档说明、PowerShell 编码经验
 └── .dsh/skills/    DSH 技能（随仓库提供 meeting-record；其余按需自建）
@@ -123,7 +123,7 @@ echo-voice-assistant/
 
 ## 配置
 
-设置全部入库（`data/echo.db`），面板里改完即生效，分组为：通用 / 语音与命令 / 唤醒词 / 会议 / 纪要归档 / 面板。
+设置全部入库（`data/echo.db`），面板里改完即生效，分组为：智能体 / 通用 / 语音命令 / 唤醒词 / 会议 / 纪要归档 / 模型路由 / 面板 / DSH 服务。
 常用项：
 
 | 键 | 含义 |
@@ -139,7 +139,8 @@ echo-voice-assistant/
 
 ## 模型路由（ECHO AUTO）
 
-ECHO 自带一个**本机模型路由**（`dsh-failover/proxy.py`，只监听 `127.0.0.1:8899`）：把多个上游
+ECHO 自带一个**本机模型路由**（`dsh-failover/proxy.py`，只监听回环，默认 `127.0.0.1:8899`、
+可被 `dsh-failover/config.json` 的 `port` 覆盖）：把多个上游
 （公司内网网关、DeepSeek 官方、任意 OpenAI 兼容端点…）组成一个「模型组」，**按通道号顺序派发**；
 前面的通道连不上、首字节超时或返回 401/429/5xx 时自动改走下一个（连续失败会短暂熔断该通道，
 冷却后再试）。
@@ -186,17 +187,23 @@ powershell -File scripts\install-qwen3asr.ps1   # 装依赖(qwen-asr) + 下载�
 
 `plugin/echo-host/` 是挂到 DSH Desktop 上的 Cordis 插件，随 DSH Desktop 启动：
 
-- 自动拉起 / 守护 ECHO Python 服务（8970），崩溃自动重启；**DSH Desktop 退出时不停止 ECHO**
-  （ECHO 常常是独立启动的，早先"随 DSH 一起关"导致一重启 DSH 服务就没了）；
+- 自动拉起 / 守护 ECHO Python 服务，崩溃自动重启；**DSH Desktop 退出时不停止 ECHO**
+  （ECHO 常常是独立启动的，早先"随 DSH 一起关"导致一重启 DSH 服务就没了）。
+  端口不写死：`ECHO_PORT` → `~/.dsh/settings.yaml` 的 `serverPort` 注释行 → 默认 8970；
+  权威来源是 ECHO 启动时写出的 `data\echo-port.txt`（本机因端口保留段冲突用的是 18060）。
 - 仪表盘热键 `Ctrl+Shift+E`：由 **ECHO 服务进程自己注册**（`app/hotkey.py` 的 `RegisterHotKey`，
-  与 `Ctrl+Alt+C` 同一套机制），按一下打开仪表盘窗口。
-  插件侧的 Electron 窗口/热键在 **DSH Desktop 2.0.9 上不可用**：从 `app.asar.unpacked` 动态
-  import 得到的 `electron` 只有 `net/systemPreferences`（渲染/工具进程子集），没有
-  `app/BrowserWindow/screen/globalShortcut`（2026-09-12 实测，见插件文件日志）。
+  与 `Ctrl+Alt+C` 同一套机制）。按一下按 `panelOpenMode` 行事：默认 `sidebar` 切换
+  **右缘边条**（`sidebar/echo-sidebar.exe`，.NET 7 + WebView2，单实例、经命名管道 toggle，
+  由 ECHO 服务拉起）；`app`=Chromium 应用窗口；`browser`=默认浏览器。
+- 插件侧的 Electron 边条窗口/热键在 **DSH Desktop 2.0.9 上不可用**（`app.asar.unpacked` 里动态
+  import 到的 `electron` 只有 `net/systemPreferences`，没有 `app/BrowserWindow/screen/globalShortcut`，
+  2026-09-12 实测，见插件文件日志）：插件仍会探测一次并记日志，探测失败即降级为 no-op，
+  边条由 ECHO 自带的 .NET 边条进程负责。
 
-面板热键/打开方式可在 面板 → 设置 → 语音 里改：`panelHotkey`（默认 `Ctrl+Shift+E`，支持
-`Ctrl+Shift+Space`、`Ctrl+Alt+F1` 等）、`panelOpenMode`（`app`=Chromium 应用窗口 / `browser`=默认浏览器）。
-热键本身由 ECHO 服务注册，所以改完只重启 ECHO 即可（不用动 DSH）。
+面板热键/打开方式可在 面板 → 设置 → **语音命令** 里改：`panelHotkey`（默认 `Ctrl+Shift+E`，
+支持 `Ctrl+Shift+Space`、`Ctrl+Alt+F1` 等）、`panelOpenMode`（`sidebar`=右缘边条（默认）/
+`app`=Chromium 应用窗口 / `browser`=默认浏览器）。热键由 ECHO 注册，改完只重启 ECHO 即可
+（不用动 DSH）。
 
 **部署（源码改动后必须重跑）**：
 
@@ -264,7 +271,8 @@ ECHO 也可以完全脱离 DSH 独立启动（转写、会议、面板都不依�
 
 ## 转写服务（可被其他应用调用）
 
-ECHO 提供本地转写 API，其他应用/脚本可直接上传音频获取转写结果（离线、自动 GPU）：
+ECHO 提供本地转写 API，其他应用/脚本可直接上传音频获取转写结果（离线、自动 GPU）。
+下面示例按**默认端口 8970** 写；实际端口见 `data\echo-port.txt`（本机可能因端口保留段冲突被改成别的，如 18060）：
 
 ```bash
 # 转写为文本（engine: sensevoice/qwen3asr/sherpa/whisper 模型名）

@@ -55,7 +55,7 @@ python -m venv venv
 ```powershell
 powershell -File scripts\setup.ps1               # 校验 venv / 补依赖 / 检查模型 / 建库
 powershell -File scripts\start.ps1 -Background   # 后台启动（无窗口）
-# 面板：http://127.0.0.1:8970
+# 面板：http://127.0.0.1:<端口>（默认 8970；实际端口见 data\echo-port.txt）
 ```
 
 - 开机自启：`powershell -File scripts\install-autostart.ps1`（卸载加 `-Remove`）
@@ -102,7 +102,7 @@ dotnet build sidebar\echo-sidebar.csproj -c Release
 ```
 
 热键 `Ctrl+Shift+E` 切换面板；折叠态是一条 64px 功能条（录音 / 电平 / 说话 / 服务状态灯 / 隐藏箭头）。
-边条宽度、热键、打开方式都在面板 → 设置 → 语音与命令 里改。
+边条宽度、热键、打开方式都在面板 → 设置 → 语音命令 里改。
 
 ## 6. 排错
 
@@ -117,8 +117,9 @@ dotnet build sidebar\echo-sidebar.csproj -c Release
 
 ## 7. 安全：本机 API 只允许本机访问
 
-ECHO 的 API（8970）与模型路由（8899）默认**不要求 token**，因为它们只监听 `127.0.0.1`。
-但"只监听回环"并不等于安全：**你打开的任意网页**，其 JS 都能访问 `http://127.0.0.1:8970`。
+ECHO 的 API（默认 8970，权威值见 `data\echo-port.txt`）与模型路由（默认 8899，见
+`dsh-failover/config.json` 的 `port`）默认**不要求 token**，因为它们只监听 `127.0.0.1`。
+但"只监听回环"并不等于安全：**你打开的任意网页**，其 JS 都能访问 `http://127.0.0.1:<端口>`（默认 8970）。
 在早期版本里这构成一条完整攻击链——页面可以
 
 * 读走会议原始录音、逐字转写、LLM 纪要（`GET /api/meetings` + `/audio` / `/file`）；
@@ -126,21 +127,22 @@ ECHO 的 API（8970）与模型路由（8899）默认**不要求 token**，因�
   随后把音频下载走——**可远程触发的窃听**；
 * `POST /api/assistant/command` 让大模型执行任意指令、`POST /models/download` 拉几 GB 占满磁盘。
 
-现在有两层防护（`app/netguard.py`，两个服务都装了）：
+现在有**四层**防护（前两层由 `app/netguard.py` 提供，ECHO 与模型路由都装了）：
 
 1. **CORS 只放行回环来源**（不再是 `allow_origins=["*"]`），跨站页面拿不到响应；
-4. **API 密钥不明文落库**：`api_keys` 只存 `sha256(token)`，校验用 `hmac.compare_digest`；
-   `GET /api/keys` 不回 token/哈希，明文仅在 `POST /api/keys` 返回一次（丢了删掉重建）。
-   开启 `apiAuthEnabled` 前先创建密钥并存到客户端，否则面板自身不带 token 会被 401。
-3. **路径穿越收口**：`GET /meetings/{id}/file?kind=` 的白名单只允许 `transcript` / `topics` / `summary`，
-   目录名取 basename，且最终路径必须仍在 `data/meetings/` 内（realpath 判定）；
-   `/meetings/{id}/audio` 同样有兜底。没有这一层，`kind=../../..` 或 `kind=C:/...` 就能读走磁盘上
-   任意 `.md`（`os.path.join` 遇到绝对路径会整段替换掉前面的目录）。
 2. **Host / Origin 守卫中间件**：`Host` 或 `Origin` 不是 `127.0.0.1` / `localhost` / `::1` 一律 **403**。
    这一层还顺带封死 **DNS Rebinding**（攻击者域名先解析到真实 IP 过校验、再改指 127.0.0.1），
    并且挡住"简单请求"式的跨站写入（那种请求浏览器不预检，只收紧 CORS 是拦不住的）。
    `Origin: null`（`file://`、sandbox iframe）也拒绝，所以折叠条页面改为经
-   `http://127.0.0.1:8970/web/rail.html` 同源加载。
+   `http://127.0.0.1:<端口>/web/rail.html`（默认 8970，权威值见 `data\echo-port.txt`）同源加载。
+3. **路径穿越收口**：`GET /meetings/{id}/file?kind=` 的白名单只允许 `transcript` / `topics` / `summary`，
+   目录名取 basename，且最终路径必须仍在 `data/meetings/` 内（realpath 判定）；
+   `/meetings/{id}/audio` 同样有兜底。没有这一层，`kind=../../..` 或 `kind=C:/...` 就能读走磁盘上
+   任意 `.md`（`os.path.join` 遇到绝对路径会整段替换掉前面的目录）。
+4. **API 密钥不明文落库**（可选，开 `apiAuthEnabled` 才生效）：`api_keys` 只存 `sha256(token)`，
+   校验用 `hmac.compare_digest`；`GET /api/keys` 不回 token/哈希，明文仅在 `POST /api/keys`
+   返回一次（丢了删掉重建）。开启 `apiAuthEnabled` 前先创建密钥并存到客户端，否则面板自身
+   不带 token 会被 401。
 
 **副作用（预期）**：用局域网 IP 从手机或别的机器访问面板会 403。
 
@@ -166,7 +168,7 @@ ECHO 的 API（8970）与模型路由（8899）默认**不要求 token**，因�
 
 **要"全程不出网"的三步**：
 
-1. 设置 → 语音与命令 → 语音合成引擎 = `sapi`（或 `off` 关闭播报）；
+1. 设置 → 语音命令 → 语音合成引擎 = `sapi`（或 `off` 关闭播报）；
 2. DSH 的 provider 指向**本机或内网**的 OpenAI 兼容服务（没有任何本地大模型时这一步无法满足，
    也就意味着"纪要 / 执行"必然出网——请据此判断能不能把会议内容交给那个服务商）；
 3. 关掉自动纪要（设置 → 会议 → 自动生成纪要），改为需要时手动生成。
@@ -177,6 +179,6 @@ ECHO 的 API（8970）与模型路由（8899）默认**不要求 token**，因�
 
 | 端口 | 用途 |
 |---|---|
-| 8970 | ECHO 服务 + 控制面板 + REST API |
+| 8970（默认，可改） | ECHO 服务 + 控制面板 + REST API。改过就以 `data\echo-port.txt` 为准（本机为 18060） |
+| 8899（默认，可改） | 模型路由（可选，见 [dsh-failover/README.md](../dsh-failover/README.md)）；改 `dsh-failover/config.json` 的 `port`（本机为 18061） |
 | 43120 | DSH Desktop 本地 API（ECHO 连它执行指令） |
-| 8899 | 模型路由（可选，见 [dsh-failover/README.md](../dsh-failover/README.md)） |

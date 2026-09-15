@@ -12,7 +12,7 @@
 
 | 功能 | Mac | 说明 |
 |---|---|---|
-| 打开控制面板 | ✅ | 原生浮动框，或浏览器打开 `http://127.0.0.1:8970` |
+| 打开控制面板 | ✅ | 原生浮动框，或浏览器打开 `http://127.0.0.1:8970`（默认端口；改过见 ECHO 的 `data/echo-port.txt`） |
 | 录音转文字 | ✅ | 默认 Whisper（可换 sherpa 等） |
 | 会议录音 + 纪要 | ✅ | 需要接 DSH 才能自动生成纪要 |
 | 语音合成（朗读） | ✅ | 在线 edge-tts；离线兜底用 macOS `say` |
@@ -42,7 +42,7 @@ mac/stop_mac.sh       # 停止
 mac/restart_mac.sh    # 重启
 ```
 
-启动后打开：**http://127.0.0.1:8970**
+启动后打开：**http://127.0.0.1:8970**（默认端口；权威值见 ECHO 的 `data/echo-port.txt`）
 
 首次使用建议：
 
@@ -60,14 +60,14 @@ mac/restart_mac.sh
 ```
 
 然后到 **系统设置 → 隐私与安全性 → 辅助功能 / 输入监控**，把运行它的程序
-（终端 / Python）勾上授权。热键在 面板 → 设置 → 语音与命令 里配置。
+（终端 / Python）勾上授权。热键在 面板 → 设置 → 语音命令 里配置。
 Mac 上暂不支持耳机媒体键触发，请用组合键。
 授权没给够时热键组件会显示失败原因，不会假装在线。
 
 ## 面板打开方式
 
 Mac 支持 `sidebar`（原生浮动框）和 `browser`（浏览器）。首次安装默认使用浮动框；
-升级保留现有选择，旧用户可在「设置 → 语音与命令 → 仪表盘打开方式」选择 `sidebar`。
+升级保留现有选择，旧用户可在「设置 → 语音命令 → 仪表盘打开方式」选择 `sidebar`。
 
 浮动框需要 macOS 12 或更新系统，使用系统自带 AppKit / WebKit，不需要额外 Python GUI 依赖。
 源码位于 `mac/sidebar/`；安装脚本会在检测到 Apple Command Line Tools 时自动构建，也可手动运行：
@@ -129,7 +129,7 @@ venv/bin/pip install pyannote.audio  # 会议说话人分离（会拉 torch，�
 
 - 运行日志：`data/logs/echo-mac.out`
 - 重启日志：`data/logs/restart-mac.out` / `.err`
-- 端口被占：`mac/stop_mac.sh` 会清理 8970 上的残留进程
+- 端口被占：`mac/stop_mac.sh` 会清理默认端口（8970；以 ECHO 的 `data/echo-port.txt` 为准）上的残留进程
 
 ## 与 Windows 版的关系
 

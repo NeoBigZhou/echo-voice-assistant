@@ -49,7 +49,8 @@
 页签实时展示进度与 `source=boot` 日志。`/api/status` 热路径读取缓存的设备
 信息，不再因模型加载而卡顿。
 
-**模型路由（可选组件）**：`dsh-failover/proxy.py`（`127.0.0.1:8899`）把多个上游组成「模型组」，
+**模型路由（可选组件）**：`dsh-failover/proxy.py`（默认 `127.0.0.1:8899`，可由
+`dsh-failover/config.json` 的 `port` 覆盖）把多个上游组成「模型组」，
 按通道号顺序派发，并做主动探测 + 被动健康/熔断（连续失败短暂摘除该通道）；ECHO 启动时把它
 注册成 DSH 的本地 provider `echo-auto`。之所以在本机放一层，是因为 DSH 的 `agent-default-model`
 只存单一 `{provider, model}`、`dsh-llm-retry` 也只在同一 provider 内重试 —— 跨上游派发
@@ -148,5 +149,5 @@ SQLite 单库：事务、索引、查询、迁移一应俱全，个人单机规�
 | `app/failover_proxy.py` | 路由进程的启停/探活（boot 组件「模型路由」的后端） |
 | `app/api.py` / `app/main.py` | REST 路由 + 应用工厂 + 静态托管 |
 | `web/` | 控制面板 SPA |
-| `dsh-failover/` | 模型路由进程（OpenAI 兼容入口 `127.0.0.1:8899`）：按通道派发 + 主动探测 + 熔断 |
+| `dsh-failover/` | 模型路由进程（OpenAI 兼容入口，默认 `127.0.0.1:8899`、可改 `config.json` 的 `port`）：按通道派发 + 主动探测 + 熔断 |
 | `sidebar/` | 右缘折叠条/边条宿主（C# WinForms + WebView2，`echo-sidebar.exe`） |
