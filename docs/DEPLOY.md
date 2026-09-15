@@ -127,21 +127,22 @@ ECHO 的 API（默认 8970，权威值见 `data\echo-port.txt`）与模型路由
   随后把音频下载走——**可远程触发的窃听**；
 * `POST /api/assistant/command` 让大模型执行任意指令、`POST /models/download` 拉几 GB 占满磁盘。
 
-现在有两层防护（`app/netguard.py`，两个服务都装了）：
+现在有**四层**防护（前两层由 `app/netguard.py` 提供，ECHO 与模型路由都装了）：
 
 1. **CORS 只放行回环来源**（不再是 `allow_origins=["*"]`），跨站页面拿不到响应；
-4. **API 密钥不明文落库**：`api_keys` 只存 `sha256(token)`，校验用 `hmac.compare_digest`；
-   `GET /api/keys` 不回 token/哈希，明文仅在 `POST /api/keys` 返回一次（丢了删掉重建）。
-   开启 `apiAuthEnabled` 前先创建密钥并存到客户端，否则面板自身不带 token 会被 401。
-3. **路径穿越收口**：`GET /meetings/{id}/file?kind=` 的白名单只允许 `transcript` / `topics` / `summary`，
-   目录名取 basename，且最终路径必须仍在 `data/meetings/` 内（realpath 判定）；
-   `/meetings/{id}/audio` 同样有兜底。没有这一层，`kind=../../..` 或 `kind=C:/...` 就能读走磁盘上
-   任意 `.md`（`os.path.join` 遇到绝对路径会整段替换掉前面的目录）。
 2. **Host / Origin 守卫中间件**：`Host` 或 `Origin` 不是 `127.0.0.1` / `localhost` / `::1` 一律 **403**。
    这一层还顺带封死 **DNS Rebinding**（攻击者域名先解析到真实 IP 过校验、再改指 127.0.0.1），
    并且挡住"简单请求"式的跨站写入（那种请求浏览器不预检，只收紧 CORS 是拦不住的）。
    `Origin: null`（`file://`、sandbox iframe）也拒绝，所以折叠条页面改为经
    `http://127.0.0.1:<端口>/web/rail.html`（默认 8970，权威值见 `data\echo-port.txt`）同源加载。
+3. **路径穿越收口**：`GET /meetings/{id}/file?kind=` 的白名单只允许 `transcript` / `topics` / `summary`，
+   目录名取 basename，且最终路径必须仍在 `data/meetings/` 内（realpath 判定）；
+   `/meetings/{id}/audio` 同样有兜底。没有这一层，`kind=../../..` 或 `kind=C:/...` 就能读走磁盘上
+   任意 `.md`（`os.path.join` 遇到绝对路径会整段替换掉前面的目录）。
+4. **API 密钥不明文落库**（可选，开 `apiAuthEnabled` 才生效）：`api_keys` 只存 `sha256(token)`，
+   校验用 `hmac.compare_digest`；`GET /api/keys` 不回 token/哈希，明文仅在 `POST /api/keys`
+   返回一次（丢了删掉重建）。开启 `apiAuthEnabled` 前先创建密钥并存到客户端，否则面板自身
+   不带 token 会被 401。
 
 **副作用（预期）**：用局域网 IP 从手机或别的机器访问面板会 403。
 
