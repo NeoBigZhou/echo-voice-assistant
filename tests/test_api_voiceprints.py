@@ -26,6 +26,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import app.db as db  # noqa: E402
 from app import meeting as meeting_mod  # noqa: E402
 from app import voiceprint as vp  # noqa: E402
+from app.config import settings  # noqa: E402
 
 
 def e(i, size=256):
@@ -45,6 +46,9 @@ class ApiVoiceprintTest(unittest.TestCase):
         meeting_mod.MEETINGS_DIR = os.path.join(cls._tmp, "meetings")
         os.makedirs(meeting_mod.MEETINGS_DIR, exist_ok=True)
         db.init()
+        # 声纹默认是关闭的（opt-in，生物特征数据，见 app/config.py）：这些用例假设已开启，
+        # 就显式打开 —— 别依赖默认值，否则默认值一改测试就跟着变红。
+        settings.update({"voiceprintEnabled": True, "voiceprintAutoEnroll": True})
 
         from fastapi import FastAPI
         from fastapi.testclient import TestClient

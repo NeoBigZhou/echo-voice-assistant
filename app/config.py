@@ -211,14 +211,18 @@ DEFAULTS = {
                              description="本地 pyannote 分离（CPU 下较慢）", value_type="bool"),
     # ---------- 常用联系人声纹（issue #6）：改名入库 → 新会议自动认人 ----------
     # 样本是说话人嵌入（256 维），只存本机 data/echo.db；不做云端、不出网。
-    "voiceprintEnabled": dict(value=True, grp="meeting", label="声纹识别常用联系人",
-                              description="会议转写时用声纹库自动识别已入库的联系人，"
+    # 【默认关闭】声纹属于生物特征数据：收集与自动认人都必须由用户显式开启（opt-in）。
+    # 注意：不要用 DEFAULT_MIGRATIONS 做 True→False 的翻转 —— 那套机制每次启动都会比对
+    # 「旧默认值」，用户一旦主动开启就会被下一次启动翻回去；改默认值 + 让用户自己开即可。
+    "voiceprintEnabled": dict(value=False, grp="meeting", label="声纹识别常用联系人",
+                              description="默认关闭。开启后会议转写会用声纹库自动识别已入库的联系人，"
                                           "把「说话人N」直接标成联系人名（需先开启「区分说话人」，"
-                                          "且联系人有已入库的声纹样本）",
+                                          "且联系人有已入库的声纹样本）；关闭时不留存任何声纹样本",
                               value_type="bool"),
-    "voiceprintAutoEnroll": dict(value=True, grp="meeting", label="改名时自动入库声纹",
-                                 description="在会议里把说话人改名为联系人时，自动把该说话人本场的声音"
-                                             "存成声纹样本（样本可在会议页「说话人管理」里查看/删除）",
+    "voiceprintAutoEnroll": dict(value=False, grp="meeting", label="改名时自动入库声纹",
+                                 description="默认关闭。开启后在会议里把说话人改名为联系人时，"
+                                             "自动把该说话人本场的声音存成声纹样本（声纹库属生物特征数据，"
+                                             "样本可在会议页「说话人管理」里查看/删除）",
                                  value_type="bool"),
     "voiceprintThreshold": dict(value=0.65, grp="meeting", label="声纹匹配阈值",
                                 description="余弦相似度下限（0~1）：越高越不容易认错人、也越容易漏认。"

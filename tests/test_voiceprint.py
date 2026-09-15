@@ -151,6 +151,40 @@ class MatcherTest(unittest.TestCase):
         self.assertFalse(m2.match(e(0))["ok"])
 
 
+class PrivacyDefaultsTest(unittest.TestCase):
+    """声纹是生物特征：默认必须关闭（opt-in），防止默认值悄悄开始收集样本。"""
+
+    def test_voiceprint_is_off_by_default(self):
+        from app.config import DEFAULTS
+        self.assertFalse(DEFAULTS["voiceprintEnabled"]["value"])
+        self.assertFalse(DEFAULTS["voiceprintAutoEnroll"]["value"])
+
+
+class RetentionGateContractTest(unittest.TestCase):
+    """没开声纹就不该留下任何声纹样本（生物特征）——用源码契约钉住这道门。
+
+    背景：转写结束本来是无条件留存各说话人的平均嵌入（便于以后「识别本场」），
+    那等于"开关关了也照样收集"。维护者要求：整块留存必须在 voiceprint.enabled() 之内。
+    """
+
+    def test_speaker_embeddings_retention_is_gated(self):
+        import ast
+
+        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        with open(os.path.join(root, "app", "meeting.py"), encoding="utf-8") as f:
+            tree = ast.parse(f.read())
+        gated = False
+        for node in ast.walk(tree):
+            if isinstance(node, ast.If) and "voiceprint.enabled()" in ast.unparse(node.test):
+                if any(isinstance(sub, ast.Call)
+                       and "replace_speaker_embeddings" in ast.unparse(sub.func)
+                       for sub in ast.walk(node)):
+                    gated = True
+        self.assertTrue(
+            gated,
+            "app/meeting.py 里 db.replace_speaker_embeddings 必须整块位于 voiceprint.enabled() 分支内")
+
+
 class IdentifyTest(unittest.TestCase):
     def test_aligns_label_and_embedding(self):
         # labels[0]="A" 的嵌入是 e(1)（无关），labels[1]="B" 的嵌入是 e(0)（张总）

@@ -519,17 +519,20 @@ def _transcribe_impl(folder):
     if diarize and registry is not None:
         try:
             from app import voiceprint
-            emb_map = {}
-            for disp, (vec, cnt) in registry.snapshot().items():
-                key = "S" + re.sub(r"\D", "", disp)
-                if remap.get(key, key) != key:
-                    # 该键已被并进别的说话人（行里已经没有它）：别再留"幽灵样本"，
-                    # 否则声纹库里会出现指向不存在说话人的条目。
-                    continue
-                blob, dim = voiceprint.pack(vec)
-                emb_map[key] = (blob, dim, cnt)
-            if emb_map:
-                db.replace_speaker_embeddings(meeting_id, emb_map)
+            # 声纹是生物特征：功能关闭时不留存任何样本（默认就是关，见 config.py 注释）。
+            # 关闭态的代价：该场会议之后点「识别本场」需要重新转写（届时再开也一样）。
+            if voiceprint.enabled():
+                emb_map = {}
+                for disp, (vec, cnt) in registry.snapshot().items():
+                    key = "S" + re.sub(r"\D", "", disp)
+                    if remap.get(key, key) != key:
+                        # 该键已被并进别的说话人（行里已经没有它）：别再留"幽灵样本"，
+                        # 否则声纹库里会出现指向不存在说话人的条目。
+                        continue
+                    blob, dim = voiceprint.pack(vec)
+                    emb_map[key] = (blob, dim, cnt)
+                if emb_map:
+                    db.replace_speaker_embeddings(meeting_id, emb_map)
         except Exception as e:
             db.add_log("warn", "voiceprint", f"留存说话人声纹样本失败：{e}")
 
