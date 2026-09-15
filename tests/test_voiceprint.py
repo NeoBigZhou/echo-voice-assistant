@@ -127,6 +127,29 @@ class MatcherTest(unittest.TestCase):
         self.assertTrue(r["ok"])
         self.assertAlmostEqual(r["sim"], 1.0, places=3)
 
+    def test_non_finite_embedding_never_matches(self):
+        """NaN/Inf 不得因为比较恒为 False 而穿透两道门（维护者补充，2026-09-15）。
+
+        NaN 相似度下 `best < threshold` 恒 False、`(best - runner) < margin` 也恒 False，
+        等于"NaN 必中"——与"宁可不认"的意图相反。_normalize 现在把非有限值归一成零向量，
+        相似度 0，必然低于阈值。
+        """
+        nan = np.full(256, np.nan, dtype=np.float32)
+        inf = np.full(256, np.inf, dtype=np.float32)
+
+        # ① 查询向量含 NaN/Inf → 不认
+        m = vp.VoiceMatcher([(1, "张总", e(0))], threshold=0.65)
+        self.assertFalse(m.match(nan)["ok"])
+        self.assertFalse(m.match(inf)["ok"])
+
+        # ② 库里的样本含 NaN（历史脏数据）→ 打包时就该归一成零向量，之后谁都不会命中
+        blob, _ = vp.pack(nan)
+        stored = np.frombuffer(blob, dtype=np.float32)
+        self.assertTrue(bool(np.all(np.isfinite(stored))))
+        self.assertEqual(float(np.linalg.norm(stored)), 0.0)
+        m2 = vp.VoiceMatcher([(1, "张总", stored)], threshold=0.65)
+        self.assertFalse(m2.match(e(0))["ok"])
+
 
 class IdentifyTest(unittest.TestCase):
     def test_aligns_label_and_embedding(self):

@@ -66,6 +66,12 @@ def thresholds():
 
 def _normalize(v):
     v = np.asarray(v, dtype=np.float32).reshape(-1)
+    if not np.all(np.isfinite(v)):
+        # NaN/Inf（上游嵌入异常时可能出现）会让余弦相似度变成 NaN，而匹配里
+        # `best < threshold` 遇 NaN 恒为 False、间隔门同样 → 等于"NaN 反而必中"。
+        # 这里归一成零向量：与任何样本的点积都是 0，必然低于阈值 → 按"不认"处理，
+        # 与「宁可不认，别认错」的设计意图一致。
+        return np.zeros_like(v)
     n = float(np.linalg.norm(v))
     return v / n if n > 0 else v
 

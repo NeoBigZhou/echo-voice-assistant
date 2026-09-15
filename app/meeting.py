@@ -509,9 +509,9 @@ def _transcribe_impl(folder):
             json.dump(meta, f, ensure_ascii=False, indent=2)
 
     # 声纹识别产物：① 同人说话人键合并（行改标到保留键）；② 留存各说话人平均声纹
+    remap = ({"S" + re.sub(r"\D", "", d): "S" + re.sub(r"\D", "", t)
+              for d, t in vp_merges.items()} if vp_merges else {})
     if vp_merges:
-        remap = {"S" + re.sub(r"\D", "", d): "S" + re.sub(r"\D", "", t)
-                 for d, t in vp_merges.items()}
         db_rows = [(seg, s, e, remap.get(spk, spk), txt) for seg, s, e, spk, txt in db_rows]
         db.add_log("info", "voiceprint",
                    f"{meeting_name}：声纹识别合并同人说话人 {len(vp_merges)} 组"
@@ -521,8 +521,13 @@ def _transcribe_impl(folder):
             from app import voiceprint
             emb_map = {}
             for disp, (vec, cnt) in registry.snapshot().items():
+                key = "S" + re.sub(r"\D", "", disp)
+                if remap.get(key, key) != key:
+                    # 该键已被并进别的说话人（行里已经没有它）：别再留"幽灵样本"，
+                    # 否则声纹库里会出现指向不存在说话人的条目。
+                    continue
                 blob, dim = voiceprint.pack(vec)
-                emb_map["S" + re.sub(r"\D", "", disp)] = (blob, dim, cnt)
+                emb_map[key] = (blob, dim, cnt)
             if emb_map:
                 db.replace_speaker_embeddings(meeting_id, emb_map)
         except Exception as e:
