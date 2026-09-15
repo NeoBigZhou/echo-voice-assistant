@@ -585,8 +585,10 @@ def build_segments(meeting_id):
 
 # ---------------------------------------------------------------- 纪要
 
-# 会议纪要工作区会话缓存：meeting_id -> sessionId（一次会议共用一个新会话，
-# 避免上下文在固定纪要会话里无限累积；会议删除时清理）。
+# 会议纪要会话缓存：meeting_id -> sessionId。
+# 语义（2026-09-15 定稿）：**一场会议一个会话**，本场的纪要、分段、语义分段、
+# 工作日志归档全部发进它；下一场会议新建。内存缓存之外还落库（db.meeting_sessions），
+# 这样 ECHO 重启后不变，归档环节（worklog）也能拿到同一个会话。
 _MEETING_SESSIONS = {}
 _MEETING_SESSIONS_LOCK = threading.Lock()
 # 同一会议的纪要/分段/语义分段请求需串行执行：并发发往同一会话时，
@@ -595,29 +597,102 @@ _MEETING_LOCKS = {}
 _MEETING_LOCKS_LOCK = threading.Lock()
 
 
-def _summary_session(client, meeting_id):
-    """解析纪要会话：
-    - 配置了 meetingWorkspace → 每次会议（按 meeting_id）在该工作区新建会话并复用；
-    - 未配置 → 沿用固定「纪要会话」。
+def _session_key(meeting_id):
+    """把会议标识统一成 meeting_sessions 的主键（会议名）。
+
+    调用方给的是 db 主键 int 的地方（如 delete_meeting）和给会议名的地方（如
+    纪要流程）都有，这里统一转换，避免两套键各自为政、映射对不上。
     """
+    if isinstance(meeting_id, int):
+        m = db.get_meeting(meeting_id)
+        return (m or {}).get("name") or str(meeting_id)
+    return str(meeting_id)
+
+
+def _summary_session(client, meeting_id):
+    """解析本场会议的纪要会话（一会话贯穿整场）。
+
+    优先级：
+      1. 内存缓存（最快路径）
+      2. 数据库映射（ECHO 重启后仍指向同一会话）
+      3. 新建：**在该会议工作区里建**，让 DSH 把它登记进工作区（侧栏归组）。
+         关键：session/create 只认 workspaceId 或 cwd 之一；用 workspaceId 建
+         才会被登记，用 cwd 建会落到「未分组」。
+      未配置 meetingWorkspace 时退回固定的「纪要会话」（旧行为）。
+    """
+    meeting_id = _session_key(meeting_id)
     ws = (settings.get("meetingWorkspace", "") or "").strip()
     if not ws:
         return client.ensure_session("summary", name="纪要会话")
+
     with _MEETING_SESSIONS_LOCK:
         sid = _MEETING_SESSIONS.get(meeting_id)
-        if sid:
-            return sid
-        sid = client.create_session(cwd=ws)
-        if sid:
-            _MEETING_SESSIONS[meeting_id] = sid
-            db.add_log("info", "meeting",
-                       f"会议纪要工作区新建会话 {sid}（{os.path.basename(ws)}）")
+    if sid:
         return sid
 
+    row = db.get_meeting_session(meeting_id)
+    if row and row.get("session_id"):
+        sid = row["session_id"]
+        with _MEETING_SESSIONS_LOCK:
+            _MEETING_SESSIONS[meeting_id] = sid
+        db.touch_meeting_session(meeting_id)
+        return sid
 
-def _drop_summary_session(meeting_id):
+    # 新建：优先走工作区（保证出现在 DSH「会议工作区」分组里）
+    sid, workspace_id, how = "", "", ""
+    try:
+        if getattr(client, "has_workspaces", lambda: False)():
+            wid, created = client.ensure_workspace(ws, title=os.path.basename(ws.rstrip("\\/")))
+            if wid:
+                sid = client.create_session(workspace_id=wid)
+                workspace_id = wid
+                how = f"工作区 {wid}" + ("（新建）" if created else "（已存在）")
+    except Exception as e:
+        db.add_log("warn", "meeting", f"按工作区创建会议会话失败，回退 cwd 方式：{e}")
+    if not sid:
+        # 回退：老方式（会话可用，但 DSH 侧会落在「未分组」）
+        sid = client.create_session(cwd=ws)
+        how = "cwd（未登记工作区，侧栏可能显示未分组）"
+
+    if sid:
+        with _MEETING_SESSIONS_LOCK:
+            _MEETING_SESSIONS[meeting_id] = sid
+        try:
+            db.upsert_meeting_session(meeting_id, sid, workspace_id)
+        except Exception as e:
+            db.add_log("warn", "meeting", f"会议会话映射落库失败：{e}")
+        db.add_log("info", "meeting",
+                   f"本场会议新建 DSH 会话 {sid}（{how}）——纪要/分段/归档共用此会话")
+    return sid
+
+
+def _drop_summary_session(meeting_id, archive=True):
+    """忘记本场会议的会话；archive=True 时同时在 DSH 侧归档该会话。
+
+    归档后它不再出现在侧栏，也不会掉进「未分组」。
+    """
+    meeting_id = _session_key(meeting_id)
     with _MEETING_SESSIONS_LOCK:
-        _MEETING_SESSIONS.pop(meeting_id, None)
+        sid = _MEETING_SESSIONS.pop(meeting_id, None)
+    row = None
+    try:
+        row = db.get_meeting_session(meeting_id)
+    except Exception:
+        row = None
+    if not sid and row:
+        sid = row.get("session_id") or ""
+    if archive and sid:
+        try:
+            client = get_client()
+            if getattr(client, "has_workspaces", lambda: False)():
+                client.archive_session(sid, workspace_id=(row or {}).get("workspace_id") or "")
+                db.add_log("info", "meeting", f"已归档会议会话 {sid}（{meeting_id}）")
+        except Exception as e:
+            db.add_log("warn", "meeting", f"归档会议会话失败（可忽略）：{e}")
+    try:
+        db.delete_meeting_session(meeting_id)
+    except Exception:
+        pass
 
 
 
@@ -1379,8 +1454,10 @@ def delete_meeting(meeting_id):
         folder = os.path.join(MEETINGS_DIR, name)
         if os.path.isdir(folder):
             shutil.rmtree(folder, ignore_errors=True)
+    # 注意顺序：_drop_summary_session 需要用会议名去查映射表，若先删了会议记录
+    # 就拿不到 name（_session_key 会退化成 id 字符串），映射和会话都会清不掉。
+    _drop_summary_session(name)
     db.delete_meeting(meeting_id)
-    _drop_summary_session(meeting_id)
     db.add_log("info", "meeting", f"已删除会议 {name}")
     return True, "已删除"
 
@@ -1402,6 +1479,8 @@ def clean_short_meetings(max_seconds=120):
         folder = os.path.join(MEETINGS_DIR, name)
         if os.path.isdir(folder):
             shutil.rmtree(folder, ignore_errors=True)
+        # 同 delete_meeting：先清会话映射（需要会议名），再删会议记录
+        _drop_summary_session(name)
         db.delete_meeting(m["id"])
         removed.append({"id": m["id"], "name": name, "duration": dur})
     if removed:

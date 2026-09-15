@@ -233,7 +233,19 @@ def api_router_register(_auth=Depends(optional_auth)):
 
 @router.get("/settings")
 def get_settings(_auth=Depends(optional_auth)):
-    return {"settings": settings.all()}
+    """配置项列表 + 智能体状态。
+
+    「智能体」分组的配置项在 config.py 里标了 hidden=True，不会出现在 settings 里，
+    由面板的智能体表格渲染（数据来自下面的 agents 字段）。
+    """
+    items = settings.all()
+    agents_payload = None
+    try:
+        from app import agents
+        agents_payload = agents.list_agents()
+    except Exception:
+        pass
+    return {"settings": items, "agents": agents_payload}
 
 
 @router.put("/settings")
@@ -250,7 +262,30 @@ def put_settings(body: SettingsIn, _auth=Depends(optional_auth)):
         ok, detail = router_admin.apply_settings(updated)
         if not ok:
             raise HTTPException(status_code=400, detail=f"路由配置未能应用：{detail}")
+    # 智能体相关项：清实例缓存，让新选择/新路径立即生效
+    if any(k.startswith("agent") for k in updated):
+        try:
+            from app import agents
+            agents.reset()
+        except Exception:
+            pass
     return {"ok": True, "updated": updated}
+
+
+@router.get("/agents")
+def get_agents(probe: bool = False, _auth=Depends(optional_auth)):
+    """智能体列表：启用态 + 可用性。
+
+    probe=1 时做重探测（CodeBuddy 会真的执行一次 CLI --version），
+    以便面板上的「检测」按钮给出确定结论。
+    """
+    from app import agents
+    items = agents.list_agents(probe=probe)
+    return {
+        "agents": items,
+        "active": next((a["name"] for a in items if a["active"]), agents.DEFAULT_AGENT),
+        "options": agents.product_options(),
+    }
 
 
 @router.post("/settings/reset")

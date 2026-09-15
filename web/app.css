@@ -280,6 +280,50 @@ main { max-width: 1200px; margin: 12px auto; padding: 0 14px; }
 .set-row .desc { color: var(--muted); font-size: 12px; flex: 1; }
 .set-row .ctl { width: 280px; }
 .set-row input[type="checkbox"] { width: 18px; height: 18px; accent-color: var(--accent); }
+
+/* ---------- 设置 → 智能体：列表开关 + 选中项展开设置 ---------- */
+.agent-table-wrap { padding: 2px 0; }
+.agent-table { display: flex; flex-direction: column; gap: 6px; }
+.agent-row {
+  display: grid; grid-template-columns: 1fr auto auto; align-items: center; gap: 12px;
+  padding: 8px 10px; border: 1px solid var(--border); border-radius: 8px;
+  background: var(--card2); transition: border-color .15s;
+}
+.agent-row.active { border-color: var(--accent); }
+.agent-row .an { font-size: 13.5px; font-weight: 600; }
+.agent-row .av { font-size: 11.5px; color: var(--muted); margin-top: 2px; }
+.agent-chip { padding: 2px 10px; border-radius: 20px; font-size: 11.5px; white-space: nowrap;
+  background: var(--card); color: var(--muted); border: 1px solid var(--border); }
+.agent-chip.on   { color: var(--green);  border-color: var(--green); }
+.agent-chip.bad  { color: var(--red);    border-color: var(--red); }
+.agent-chip.idle { color: var(--accent); border-color: var(--accent); }
+/* 复用「模型路由」那套开关外观（.rt-sw），保持一致 */
+.agent-cell-switch .rt-sw { display: inline-flex; cursor: pointer; }
+.agent-cell-switch .rt-sw input { display: none; }
+.agent-cell-switch .rt-sw i {
+  width: 26px; height: 15px; border-radius: 8px; background: var(--border);
+  position: relative; transition: background .15s;
+}
+.agent-cell-switch .rt-sw i::after {
+  content: ""; position: absolute; top: 2px; left: 2px; width: 11px; height: 11px;
+  border-radius: 50%; background: #fff; transition: left .15s;
+}
+.agent-cell-switch .rt-sw input:checked + i { background: var(--green); }
+.agent-cell-switch .rt-sw input:checked + i::after { left: 13px; }
+
+.agent-detail {
+  margin-top: 8px; padding: 10px 12px; border: 1px solid var(--border);
+  border-left: 3px solid var(--accent); border-radius: 8px;
+}
+.agent-detail-head { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; }
+.agent-detail-desc { color: var(--muted); font-size: 12.5px; line-height: 1.55; }
+.agent-field { margin-top: 10px; display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.agent-field > label { width: 180px; flex-shrink: 0; font-size: 13px; }
+.agent-field .ctl { width: 280px; }
+.agent-field .desc { flex: 1; min-width: 200px; }
+.agent-detail-msg { margin-top: 8px; font-size: 12px; line-height: 1.55; color: var(--muted); }
+.agent-detail-msg.ok { color: var(--green); }
+.agent-detail-msg.warn { color: var(--yellow); }
 select.ctl, input.ctl { background: var(--card2); color: var(--text); border: 1px solid var(--border);
   border-radius: 8px; padding: 6px 10px; font-size: 13px; outline: none; }
 

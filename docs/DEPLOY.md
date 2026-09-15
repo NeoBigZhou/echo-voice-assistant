@@ -16,12 +16,19 @@
 
 > **路径尽量全英文**：`D:\ECHO` ✅ ／ `D:\学习\ECHO` ❌。
 > 少数原生依赖（nagisa/dynet、部分 funasr 组件）读不了非 ASCII 路径。
-> 若必须放在中文路径下：另建一个 ASCII 目录联接指向该 venv，并把解释器路径写进环境变量
-> `ECHO_PYTHON`（所有脚本都优先使用它）：
+> 若必须放在中文路径下：另建一个 ASCII 目录联接（junction）指向该 venv，并把解释器路径写进**两个**
+> 环境变量——`ECHO_PYTHON`（所有脚本都优先使用它，见 `scripts\*.ps1`）和 `ECHO_PYTHONW`
+> （DSH 的 echo-host 插件用它拉起服务；只设 `ECHO_PYTHON` 不够，因为插件走的是 `pythonw`）：
 > ```powershell
 > New-Item -ItemType Junction -Path C:\echo-venv -Target <你的ECHO目录>\venv
-> setx ECHO_PYTHON C:\echo-venv\Scripts\python.exe
+> setx ECHO_PYTHON  C:\echo-venv\Scripts\python.exe
+> setx ECHO_PYTHONW C:\echo-venv\Scripts\pythonw.exe
 > ```
+> **两个变量都必须写「联接路径」（ASCII）**，不要写成 `<你的ECHO目录>\venv\Scripts\...` 的真实中文路径；
+> 否则会议转写选 `qwen3asr` 时会在加载引擎处失败，报错只有一句
+> `RuntimeError: Could not read model from ...\nagisa\data\nagisa_v001.model`
+> （2026-09-15 迁移事故就是这个原因：仓库仍是中文路径，但解释器从 junction 换成了仓库内 venv）。
+> 仓库搬家/改名后 junction 的 Target 会失效（联接指向旧路径），需要重新 `New-Item -ItemType Junction`。
 
 ## 1. 取代码 + 建 venv
 

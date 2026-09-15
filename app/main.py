@@ -59,6 +59,24 @@ async def lifespan(app: FastAPI):
     boot.setup()
     boot.start_all_async()   # 后台分阶段拉起其余组件，不阻塞 yield
 
+    # 归档前置自检（后台 best-effort）：确保 DSH 新建会话的默认权限是全盘访问。
+    # 笔记库在归档会话的工作区之外，权限不足时首次写入会被沙箱拦下、只能靠 DSH 的
+    # "自动提权重试"补救，慢到会被面板判成失败（2026-09-15 事故）。失败只写日志。
+    def _worklog_preflight():
+        try:
+            from app import worklog
+            if not worklog.enabled():
+                return
+            ok, why = worklog.ensure_dsh_default_access()
+            db.add_log("info" if ok else "warn", "meeting", f"归档权限自检：{why}")
+        except Exception as e:
+            try:
+                db.add_log("warn", "meeting", f"归档权限自检异常：{e}")
+            except Exception:
+                pass
+
+    threading.Thread(target=_worklog_preflight, daemon=True, name="worklog-preflight").start()
+
     # 启动后自动显示折叠条（设置 panelAutoStart / panelStartCollapsed）：
     # 等服务真正开始监听再起——折叠条页面是经 http://127.0.0.1:8970/web/rail.html 同源加载的，
     # 起太早会先撞上连接失败（边条侧虽有重试，但没必要）。已在运行则不打扰：

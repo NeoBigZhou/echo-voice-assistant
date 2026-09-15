@@ -166,6 +166,30 @@ def _get_sherpa():
         return recognizer
 
 
+def _ascii_path_hint(exc):
+    """加载失败时的路径根因提示：解释器/站点包落在非 ASCII 路径下。
+
+    nagisa → dyNet 用窄字符 fopen 读模型文件，路径含中文时甩出来的只有一句
+    "Could not read model from ...\\nagisa\\data\\nagisa_v001.model"，很难一眼看出是路径问题
+    （2026-09-15 事故：迁移后 ECHO_PYTHON/ECHO_PYTHONW 被指向中文路径下的 venv，
+    qwen3asr 每场会议都在这里炸，只剩 wav 没有转写）。
+    命中时把修复方向直接附在异常后，见 docs/DEPLOY.md「路径尽量全英文」。
+    """
+    msg = str(exc)
+    if "nagisa" not in msg and "Could not read model" not in msg:
+        return ""
+    try:
+        import site
+        cands = list(site.getsitepackages() or []) + [sys.prefix, sys.executable]
+        if not any(any(ord(c) > 127 for c in str(p)) for p in cands):
+            return ""
+    except Exception:
+        return ""
+    return ("\n[stt] 根因：解释器/站点包位于非 ASCII 路径，nagisa(dyNet) 读不了这类路径下的模型文件。"
+            "请用指向 venv 的 ASCII 目录联接（junction）解释器启动 ECHO，并设置 ECHO_PYTHON 与 "
+            "ECHO_PYTHONW（DSH 的 echo-host 插件用后者拉起服务），详见 docs/DEPLOY.md。")
+
+
 def _get_qwen3asr(device="auto", model_name="Qwen/Qwen3-ASR-0.6B", forced_aligner=None):
     """funasr Qwen3-ASR（qwen-asr 包，52 语言，中文准确率高于 SenseVoice）。
 
@@ -201,7 +225,11 @@ def _get_qwen3asr(device="auto", model_name="Qwen/Qwen3-ASR-0.6B", forced_aligne
             print(f"[stt] Qwen3-ASR 加载失败，回退 CPU: {e}", file=sys.stderr)
             kwargs["device"] = "cpu"
             kwargs["dtype"] = "fp32"
-            model = AutoModel(**kwargs)
+            try:
+                model = AutoModel(**kwargs)
+            except Exception as e2:
+                # 两次都失败：多半是环境问题（如非 ASCII 路径），把可执行的修复方向一起抛出去
+                raise RuntimeError(f"{e2}{_ascii_path_hint(e2)}") from e2
         _ENGINES[key] = model
         _cache_gpu_name()
         return model
